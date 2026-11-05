@@ -210,8 +210,6 @@ loss, file corruption, or an application crash.
 | ![Duplicates view](screenshots/duplicates.png) | ![Settings & Hotkeys](screenshots/settings_and_hotkeys.png) |
 
 ### Manage
-| Manage |
-|---|---|
 | ![Manage view](screenshots/manage.png) |
 
 ---
