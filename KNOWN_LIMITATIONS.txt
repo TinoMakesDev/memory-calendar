@@ -1,1334 +1,1466 @@
 ================================================================================
-  Memory Calendar - Known Limitations
+ Memory Calendar - Known Limitations
 ================================================================================
 
 This document describes behaviors that look like bugs but are intentional,
 cosmetic, or fixed at acceptable cost in other places. They are NOT patched.
 
 Policy for future patches:
-  Patch only if the change prevents:
-  - data loss (file irrecoverably lost),
-  - file corruption (file becomes unreadable),
-  - application crash.
-  Everything else goes into this file. No exceptions.
+ Patch only if the change prevents:
+ - data loss (file irrecoverably lost),
+ - file corruption (file becomes unreadable),
+ - application crash.
+ Everything else goes into this file. No exceptions.
 
 If you're reviewing the code and find a new issue, check this list first.
 Most likely it's already documented with a rationale.
 
 ================================================================================
-  A. INTENTIONAL DESIGN / UX DECISIONS
+ A. INTENTIONAL DESIGN / UX DECISIONS
 ================================================================================
 
 A1. Ctrl+Z cannot undo cut+paste done outside the app
-  Scenario: cut inside app → paste via Windows Explorer → Ctrl+Z in app.
-  Result: calendar restored, but file is not returned to original folder
-  (destination path is unknown to the app — no filesystem watcher).
-  Why: file system watchers on Windows are unreliable on network shares,
-  limit ~10k handles per process, and don't reveal destination.
-  Mitigation: status bar message "Ctrl+Z cannot undo external moves"
-  shown when external move is detected.
+ Scenario: cut inside app → paste via Windows Explorer → Ctrl+Z in app.
+ Result: calendar restored, but file is not returned to original folder
+ (destination path is unknown to the app — no filesystem watcher).
+ Why: file system watchers on Windows are unreliable on network shares,
+ limit ~10k handles per process, and don't reveal destination.
+ Mitigation: status bar message "Ctrl+Z cannot undo external moves"
+ shown when external move is detected.
 
 A2. External drive disconnect → calendar entries stay as "missing"
-  Scenario: user cut file from external drive → drive disconnects →
-  cut-watch timer runs.
-  Result: files NOT purged (3-tick confirmation, ~4.5s, plus parent-dir
-  accessibility check before purge).
-  Why: purging on transient disconnect would wipe calendar entries.
-  Mitigation: Settings → "Find missing files" is a manual action with
-  preview and confirmation; no auto-purge on open_gallery.
+ Scenario: user cut file from external drive → drive disconnects →
+ cut-watch timer runs.
+ Result: files NOT purged (3-tick confirmation, ~4.5s, plus parent-dir
+ accessibility check before purge).
+ Why: purging on transient disconnect would wipe calendar entries.
+ Mitigation: Settings → "Find missing files" is a manual action with
+ preview and confirmation; no auto-purge on open_gallery.
 
 A3. Rotate in viewer does not create an undo entry
-  Scenario: rotate image → Ctrl+Z.
-  Result: previous file operation is undone, not the rotation.
-  Why: rotation overwrites file in place via temp+os.replace; original
-  bytes are gone (but orientation can be flipped back).
-  Behavior matches most image editors (Lightroom, Photoshop quick rotate).
-  Mitigation: none. Users who need to undo a rotate do it manually.
+ Scenario: rotate image → Ctrl+Z.
+ Result: previous file operation is undone, not the rotation.
+ Why: rotation overwrites file in place via temp+os.replace; original
+ bytes are gone (but orientation can be flipped back).
+ Behavior matches most image editors (Lightroom, Photoshop quick rotate).
+ Mitigation: none. Users who need to undo a rotate do it manually.
 
 A4. Paste in "Months" / "Years" / "Duplicates" views is disabled
-  Scenario: user opens Months view and presses Ctrl+V.
-  Result: "Paste is only available in Gallery view" in status bar.
-  Why: no single unambiguous target folder — gallery_context is "2024-03"
-  or "2024", not a date key that maps to a folder.
-  Behavior is a conscious restriction, not a bug.
+ Scenario: user opens Months view and presses Ctrl+V.
+ Result: "Paste is only available in Gallery view" in status bar.
+ Why: no single unambiguous target folder — gallery_context is "2024-03"
+ or "2024", not a date key that maps to a folder.
+ Behavior is a conscious restriction, not a bug.
 
 A5. Paste-move between calendars drops cross-calendar membership
-  Scenario: file is in Calendar A and Calendar B → cut in A, paste in A.
-  Result: file moves to new path, old path purged from BOTH calendars,
-  new path added to A only.
-  Why: "move" = physical relocation = logical move; keeping a phantom
-  entry in B pointing to a path that no longer exists is worse.
-  If you need the file in both calendars: copy instead of cut.
+ Scenario: file is in Calendar A and Calendar B → cut in A, paste in A.
+ Result: file moves to new path, old path purged from BOTH calendars,
+ new path added to A only.
+ Why: "move" = physical relocation = logical move; keeping a phantom
+ entry in B pointing to a path that no longer exists is worse.
+ If you need the file in both calendars: copy instead of cut.
 
 A6. Paste-move drops event membership (move within app)
-  Scenario: file belongs to event "Vacation 2024" → cut → paste
-  somewhere else (still in same calendar).
-  Result: file physically moved, entry added to calendar, but NOT
-  re-attached to any events. _purge_path_everywhere(fp) removes
-  old path from categories; new dest is not re-added.
-  Why: "move" implies relocation; keeping the event slot pointing at a
-  non-existent path is worse. Re-adding automatically would
-  require tracking event membership through the paste pipeline.
-  Workaround: use Copy instead of Cut. Or reassign event manually.
-  Copy-paste is unaffected (source and event binding stay intact).
+ Scenario: file belongs to event "Vacation 2024" → cut → paste
+ somewhere else (still in same calendar).
+ Result: file physically moved, entry added to calendar, but NOT
+ re-attached to any events. _purge_path_everywhere(fp) removes
+ old path from categories; new dest is not re-added.
+ Why: "move" implies relocation; keeping the event slot pointing at a
+ non-existent path is worse. Re-adding automatically would
+ require tracking event membership through the paste pipeline.
+ Workaround: use Copy instead of Cut. Or reassign event manually.
+ Copy-paste is unaffected (source and event binding stay intact).
 
 A7. Ctrl+E (assign event) works in Viewer, not in Gallery
-  Why: Gallery already has "right-click → Assign event" and Ctrl+E is
-  reserved for Viewer (where right-click menu is less discoverable).
-  If needed: use context menu in Gallery.
+ Why: Gallery already has "right-click → Assign event" and Ctrl+E is
+ reserved for Viewer (where right-click menu is less discoverable).
+ If needed: use context menu in Gallery.
 
 A8. Cut + paste via OS on macOS/Linux behaves as copy, not move
-  Scenario: cut a file in Memory Calendar, then paste it via Finder
-  or Nautilus.
-  Result: the external paste copies the file; the source remains on disk.
-  Why: move intent is signalled with the Windows-only MIME type
-  Preferred DropEffect (DROPEFFECT_MOVE). Finder/Nautilus ignore it.
-  In-app paste still performs a real move via internal clipboard_action.
-  Deferred until macOS/Linux hardware testing. NB-124.
+ Scenario: cut a file in Memory Calendar, then paste it via Finder
+ or Nautilus.
+ Result: the external paste copies the file; the source remains on disk.
+ Why: move intent is signalled with the Windows-only MIME type
+ Preferred DropEffect (DROPEFFECT_MOVE). Finder/Nautilus ignore it.
+ In-app paste still performs a real move via internal clipboard_action.
+ Deferred until macOS/Linux hardware testing.
 
 A9. Events (categories) are global and not tied to a specific calendar
-  Scenario: User has multiple calendars (e.g., "Phone", "Camera") and creates
-  an event "Vacation 2024". User switches the active calendar.
-  Result: The event "Vacation 2024" remains visible and keeps all its files,
-  regardless of the currently selected calendar.
-  Why: Events are designed as virtual albums that span the entire library.
-  A user might have photos of the same trip scattered across different
-  physical drives or folders. Tying events to a single calendar would
-  require duplicate event creation and break the cross-library concept.
-  This is a deliberate design choice for flexibility.
+ Scenario: User has multiple calendars (e.g., "Phone", "Camera") and creates
+ an event "Vacation 2024". User switches the active calendar.
+ Result: The event "Vacation 2024" remains visible and keeps all its files,
+ regardless of the currently selected calendar.
+ Why: Events are designed as virtual albums that span the entire library.
+ A user might have photos of the same trip scattered across different
+ physical drives or folders. Tying events to a single calendar would
+ require duplicate event creation and break the cross-library concept.
+ This is a deliberate design choice for flexibility.
 
 ================================================================================
-  B. LIMITATIONS OF UNDO/REDO MODEL
+ B. LIMITATIONS OF UNDO/REDO MODEL
 ================================================================================
 
 B1. Undo of copy-paste does not delete created copies
-  Scenario: Ctrl+V (copy) → Ctrl+Z.
-  Result: calendar state restored (no pasted entries), but copied files
-  remain on disk as orphans.
-  Why: redo cannot recreate deleted copies without the original source,
-  so removing them on undo would make redo incomplete (or crash).
-  Cost: orphan files accumulate; user sees them on next rescan.
-  If needed: manually delete orphans from disk.
+ Scenario: Ctrl+V (copy) → Ctrl+Z.
+ Result: calendar state restored (no pasted entries), but copied files
+ remain on disk as orphans.
+ Why: redo cannot recreate deleted copies without the original source,
+ so removing them on undo would make redo incomplete (or crash).
+ Cost: orphan files accumulate; user sees them on next rescan.
+ If needed: manually delete orphans from disk.
 
 B2. Redo is explicitly skipped for paste-with-overwrite 
-  Scenario: paste A over B (B → trash, A → dest) → Ctrl+Z → Ctrl+Y.
-  Result: redo detects action["overwritten"], skips this redo step
-  with a status-bar message:
-  "Redo skipped: paste-with-overwrite cannot be replayed
-  safely (disk state would desync). Use Ctrl+Z again, or
-  paste again manually."
-  The redo step is popped; disk and calendar stay consistent.
-  Why: undo's bookkeeping for "overwritten" is not symmetric with redo;
-  a silent replay would leave calendar pointing at "A" while disk
-  has old "B". Correct replay would need to thread "which dest was
-  created, which was trashed, in which order to release/replace"
-  through history — error-prone in edge cases (occupied dest,
-  trash auto-cleaned after 7d). Silent-wrong is worse than explicit
-  refusal. See A-notes in patch log.
-  Data safety: all versions preserved (trash + disk); Ctrl+Z still works;
-  user can re-paste manually.
-  Note on pure copy-paste (no overwrite): undo leaves the copy on disk
-  (B1); redo just restores the calendar entry. That path is NOT
-  skipped — it works correctly.
+ Scenario: paste A over B (B → trash, A → dest) → Ctrl+Z → Ctrl+Y.
+ Result: redo detects action["overwritten"], skips this redo step
+ with a status-bar message:
+ "Redo skipped: paste-with-overwrite cannot be replayed
+ safely (disk state would desync). Use Ctrl+Z again, or
+ paste again manually."
+ The redo step is popped; disk and calendar stay consistent.
+ Why: undo's bookkeeping for "overwritten" is not symmetric with redo;
+ a silent replay would leave calendar pointing at "A" while disk
+ has old "B". Correct replay would need to thread "which dest was
+ created, which was trashed, in which order to release/replace"
+ through history — error-prone in edge cases (occupied dest,
+ trash auto-cleaned after 7d). Silent-wrong is worse than explicit
+ refusal. See A-notes in patch log.
+ Data safety: all versions preserved (trash + disk); Ctrl+Z still works;
+ user can re-paste manually.
+ Note on pure copy-paste (no overwrite): undo leaves the copy on disk
+ (B1); redo just restores the calendar entry. That path is NOT
+ skipped — it works correctly.
 
 B3. Undo snapshots use copy.deepcopy — memory scales with library size
-  Scale: for N files × undo_limit, peak memory ≈ N × undo_limit × ~200 bytes.
-  For 100k files × 30 limit ≈ 600 MB peak.
-  Why: deepcopy is simple and safe; delta-based undo is a large redesign.
-  Mitigation: Settings → "Undo history depth" (1–200). Home users with
-  < 20k files can leave it at 30. Library admins should
-  reduce to 5–10.
+ Scale: for N files × undo_limit, peak memory ≈ N × undo_limit × ~200 bytes.
+ For 100k files × 30 limit ≈ 600 MB peak.
+ Why: deepcopy is simple and safe; delta-based undo is a large redesign.
+ Mitigation: Settings → "Undo history depth" (1–200). Home users with
+ < 20k files can leave it at 30. Library admins should
+ reduce to 5–10.
 
 B4. scan_finished pushes an undo state before validating target calendar
-  HISTORICAL — fixed in (NB-17, see G19). Was: save_state_for_undo
-  ran before target_name check; mid-scan deletion pushed a phantom
-  undo step. Current behaviour: save_state_for_undo runs after the
-  check. Kept as historical reference only.
+ HISTORICAL — fixed in v1.0 (see G19). Was: save_state_for_undo
+ ran before target_name check; mid-scan deletion pushed a phantom
+ undo step. Current behaviour: save_state_for_undo runs after the
+ check. Kept as historical reference only.
 
-  note: even if a similar race existed, the _scan_in_progress
-  guard now blocks deleting/renaming the calendar being scanned —
-  user cannot start those ops until the scan finishes.
+ note: even if a similar race existed, the _scan_in_progress
+ guard now blocks deleting/renaming the calendar being scanned —
+ user cannot start those ops until the scan finishes.
 
 B5. Undo after find_missing_files restores "phantom" entries
-  Scenario: Find missing files → confirm cleanup → Ctrl+Z.
-  Result: calendar entries pointing at non-existent paths are restored.
-  Preview will be broken until next rescan or "Find missing
-  files" again.
-  Why: save_state_for_undo runs before purge (as designed). The
-  snapshot correctly captures pre-purge state.
-  This is a UX artifact of "undo restores data", not data loss —
-  files are already gone from disk; only calendar entries come back.
-  If needed: run Find missing files again, or rescan the folder.
+ Scenario: Find missing files → confirm cleanup → Ctrl+Z.
+ Result: calendar entries pointing at non-existent paths are restored.
+ Preview will be broken until next rescan or "Find missing
+ files" again.
+ Why: save_state_for_undo runs before purge (as designed). The
+ snapshot correctly captures pre-purge state.
+ This is a UX artifact of "undo restores data", not data loss —
+ files are already gone from disk; only calendar entries come back.
+ If needed: run Find missing files again, or rescan the folder.
 
 B6. Undo with empty trash_path (file already gone) creates dead entry
-  Scenario: move_to_trash returns (True, None) because file was missing
-  pre-delete → undo restores snapshot with a path that
-  doesn't exist on disk.
-  Cosmetic — visible as "missing" until cleanup.
+ Scenario: move_to_trash returns (True, None) because file was missing
+ pre-delete → undo restores snapshot with a path that
+ doesn't exist on disk.
+ Cosmetic — visible as "missing" until cleanup.
 
 ================================================================================
-  C. CUT-WATCH / EXTERNAL-MOVE EDGE CASES
+ C. CUT-WATCH / EXTERNAL-MOVE EDGE CASES
 ================================================================================
 
 C1. _watch_cut_files requires 3 ticks (4.5s) of confirmed absence
-  Scenario: cut → immediately paste via Explorer → close app within 4.5s.
-  Result: file stays in calendar as a "ghost" until next manual refresh
-  or next time _watch_cut_files runs.
-  Why: 3-tick confirmation defends against AV/backup temporarily moving
-  files out of a folder for a fraction of a second.
-  Cost: 4.5s delay in the "fast close" scenario.
-  Not patched: increasing ticks delays legitimate external-move
-  detection; network shares with high latency are a
-  documented trade-off.
+ Scenario: cut → immediately paste via Explorer → close app within 4.5s.
+ Result: file stays in calendar as a "ghost" until next manual refresh
+ or next time _watch_cut_files runs.
+ Why: 3-tick confirmation defends against AV/backup temporarily moving
+ files out of a folder for a fraction of a second.
+ Cost: 4.5s delay in the "fast close" scenario.
+ Not patched: increasing ticks delays legitimate external-move
+ detection; network shares with high latency are a
+ documented trade-off.
 
-C2. _watch_cut_files only runs when stack.currentIndex == 4 (Gallery)
-  Scenario: cut → switch to Settings tab → paste in Explorer → back to
-  Gallery.
-  Result: on return to Gallery, timer ticks, purge runs within 1.5s.
-  Why: to avoid running file I/O in background while user is in another
-  tab. Behavior is "detects on next visit", not "monitors always".
+C2. _watch_cut_files was stack-bound
+ FIXED in v1.1. Previously: timer only ran when the Gallery view
+ was active. Current: the handler inspects the active stack and
+ refreshes Calendar (0), Gallery (4), or Viewer (5) accordingly.
+ External moves are detected on any of these three pages.
 
 C3. _cut_missing_streak entries for files that reappear are cleaned lazily
-  Scenario: file briefly missing (streak 1–2) → reappears.
-  Result: streak entry is dropped on next tick.
+ Scenario: file briefly missing (streak 1–2) → reappears.
+ Result: streak entry is dropped on next tick.
 
 C4. Drag-Move from gallery to Explorer: partial move tracked, not full
-  Scenario: select 3 files, drag to Explorer with Shift (Move), release.
-  Result: moved files purged; remaining clipboard files stay in internal
-  clipboard and cut-watch resumes.
-  Why: drag.exec returns one action for the batch; we don't know which
-  individual files succeeded on the OS side. The purge is based on
-  os.path.exists check post-drop.
+ Scenario: select 3 files, drag to Explorer with Shift (Move), release.
+ Result: moved files purged; remaining clipboard files stay in internal
+ clipboard and cut-watch resumes.
+ Why: drag.exec returns one action for the batch; we don't know which
+ individual files succeeded on the OS side. The purge is based on
+ os.path.exists check post-drop.
 
 C5. _on_files_moved_externally under @_busy_guard dropped signal
-  FIXED (NB-08). Previously: drag-move to Explorer while another
-  long operation was in progress (_busy=True) → @_busy_guard silently
-  returned → OS had moved files, calendar kept stale paths until manual
-  rescan / Settings → Find missing files.
-  Current behaviour: on _busy the handler defers via
-  QTimer.singleShot(500, retry) and _busy flag is set only around the
-  actual purge/rebuild work. `_on_files_moved_externally_impl` is
-  idempotent (purge uses set; clipboard filter is idempotent), so
-  double-call is safe. Retry log: "drag move: busy, deferring 500ms".
+ FIXED. Previously: drag-move to Explorer while another
+ long operation was in progress (_busy=True) → @_busy_guard silently
+ returned → OS had moved files, calendar kept stale paths until manual
+ rescan / Settings → Find missing files.
+ Current behaviour: on _busy the handler defers via
+ QTimer.singleShot(500, retry) and _busy flag is set only around the
+ actual purge/rebuild work. `_on_files_moved_externally_impl` is
+ idempotent (purge uses set; clipboard filter is idempotent), so
+ double-call is safe. Retry log: "drag move: busy, deferring 500ms".
 
 C6. _watch_cut_files in viewer did not flag gallery rebuild
-  FIXED (NB-07). Previously: in viewer (stack==5), external move
-  was detected, current file purged, `_on_viewer_back` entered gallery
-  but `_gallery_needs_rebuild` stayed False → stale "phantom" card until
-  user scrolled/resized.
-  Current behaviour: `_gallery_needs_rebuild = True` is set before
-  `_on_viewer_back`, so the non-dups rebuild path runs immediately.
+ FIXED. Previously: in viewer (stack==5), external move
+ was detected, current file purged, `_on_viewer_back` entered gallery
+ but `_gallery_needs_rebuild` stayed False → stale "phantom" card until
+ user scrolled/resized.
+ Current behaviour: `_gallery_needs_rebuild = True` is set before
+ `_on_viewer_back`, so the non-dups rebuild path runs immediately.
 
 ================================================================================
-  D. FILE SYSTEM / TRASH
+ D. FILE SYSTEM / TRASH
 ================================================================================
 
 D1. move_to_trash has bounded retry: 5 × 0.15s = 0.75s worst case
-  Scenario: file locked by antivirus / another program.
-  Result: after 5 failed attempts, deletion is reported as failed.
-  Why: 10 retries × 0.15s = 1.5s per locked file was unacceptable on
-  bulk operations (50 locked files = 75s freeze).
+ Scenario: file locked by antivirus / another program.
+ Result: after 5 failed attempts, deletion is reported as failed.
+ Why: 10 retries × 0.15s = 1.5s per locked file was unacceptable on
+ bulk operations (50 locked files = 75s freeze).
 
 D2. Trash auto-clean retention is 7 days (based on entry time)
-  FIXED: retention now uses the timestamp prefix embedded by
-  move_to_trash (`f"mc_{ts}_{basename}"`), not the source file's mtime.
-  Previously: shutil.move preserves mtime, so a photo taken 2 years ago
-  and just deleted would be purged from trash on next app start
-  (~2s after launch via check_auto_clean) — real data loss.
+ FIXED: retention now uses the timestamp prefix embedded by
+ move_to_trash (`f"mc_{ts}_{basename}"`), not the source file's mtime.
+ Previously: shutil.move preserves mtime, so a photo taken 2 years ago
+ and just deleted would be purged from trash on next app start
+ (~2s after launch via check_auto_clean) — real data loss.
 
-  v1.0 mc_-prefix note: trash entries created before the change
-  (v0.x builds, filenames like `<ts>_<name>`) are NOT auto-cleaned.
-  This is intentional and safe — old trash won't disappear on its
-  own. If it grows large, clean it manually.
+ v1.0 mc_-prefix note: trash entries created before the change
+ (v0.x builds, filenames like `<ts>_<name>`) are NOT auto-cleaned.
+ This is intentional and safe — old trash won't disappear on its
+ own. If it grows large, clean it manually.
 
-  Current behavior:
-  - age = now − timestamp_parsed_from_filename (parsed from
-  the leading <microseconds>_ prefix that move_to_trash adds)
-  - files WITHOUT a prefix are LEFT ALONE. Previously,
-  clean_trash fell back to st_mtime for unprefixed files —
-  safe when trash_dir was hardcoded DATA_DIR/trash (..),
-  but DANGEROUS after trash became user-configurable :
-  a user pointing trash at a folder with e.g. "photo.jpg"
-  would have that file silently deleted by retention.
-  Now: no prefix → not ours → not touched. This is the honest
-  way to keep "user-chosen trash folder" safe.
-  - Retention period: config["trash_retention_days"] days
-  (7..365, default 7; independent from cache retention.
-  Range clamped both in Settings UI and in check_auto_clean —
-  see D10 for the trash-folder feature.)
+ Current behavior:
+ - age = now − timestamp_parsed_from_filename (parsed from
+ the leading <microseconds>_ prefix that move_to_trash adds)
+ - files WITHOUT a prefix are LEFT ALONE. Previously,
+ clean_trash fell back to st_mtime for unprefixed files —
+ safe when trash_dir was hardcoded DATA_DIR/trash (..),
+ but DANGEROUS after trash became user-configurable :
+ a user pointing trash at a folder with e.g. "photo.jpg"
+ would have that file silently deleted by retention.
+ Now: no prefix → not ours → not touched. This is the honest
+ way to keep "user-chosen trash folder" safe.
+ - Retention period: config["trash_retention_days"] days
+ (7..365, default 7; independent from cache retention.
+ Range clamped both in Settings UI and in check_auto_clean —
+ see D10 for the trash-folder feature.)
 
 D3. Restore from trash can fail if target path is occupied
-  Scenario: undo delete of A → someone created a new file at A's path.
-  Result: restore_failed warning; A stays in trash.
-  Why: silent overwrite on restore is data loss; refusing is safer.
+ Scenario: undo delete of A → someone created a new file at A's path.
+ Result: restore_failed warning; A stays in trash.
+ Why: silent overwrite on restore is data loss; refusing is safer.
 
 D4. Sample-based hash for large photo files (> 6 MB)
-  Scale: 2MB head + 2MB middle + 2MB tail = 6 MB read per file.
-  Why for photos: photo bytes don't change in middle; two distinct
-  photos with identical first/middle/last 2 MB would be identical
-  everywhere.
-  Videos: full hash — see D5.
+ Scale: 2MB head + 2MB middle + 2MB tail = 6 MB read per file.
+ Why for photos: photo bytes don't change in middle; two distinct
+ photos with identical first/middle/last 2 MB would be identical
+ everywhere.
+ Videos: full hash — see D5.
 
 D5. Videos > 6 MB always use full SHA-256
-  Scale: 200 MB video = 200 MB read per dedup scan.
-  Cost: dedup scan of large video library is slow.
-  Why: sample-based hash false-positives real video pairs → wrong
-  deletion. Data loss is worse than slow scan.
+ Scale: 200 MB video = 200 MB read per dedup scan.
+ Cost: dedup scan of large video library is slow.
+ Why: sample-based hash false-positives real video pairs → wrong
+ deletion. Data loss is worse than slow scan.
 
 D6. Folders with "_" prefix or in SKIP_DIRS are skipped by scanner
-  SKIP_DIRS: $recycle.bin, system volume information, .thumbnails,
-  @eadir, __macosx, .cache, .local, node_modules.
-  Plus: any folder whose name starts with "."
+ SKIP_DIRS: $recycle.bin, system volume information,.thumbnails,
+ @eadir, __macosx,.cache,.local, node_modules.
+ Plus: any folder whose name starts with "."
 
-D7. restore_from_trash does not restore original mtime
-  Scenario: delete file → Ctrl+Z.
-  Result: file restored with shutil.move; mtime may differ from original.
-  Why: preserving mtime would require os.utime after restore, and the
-  "correct" value isn't stored anywhere.
-  Impact: "Sort by date" may position file differently after restore.
-  Not data loss — file content is intact.
+D7. restore_from_trash did not restore original mtime
+ FIXED in v1.1. Previously: used shutil.move, which dropped mtime.
+ Current: uses copy2 (preserves mtime) + atomic os.replace.
+ Impact: "Sort by date" keeps the file in its original position
+ after undo.
 
 D8. _cleanup_backups sorts lexicographically, not by mtime
-  FIXED (NB-16). Previously: sorted(glob) is string-
-  comparison — "…_1.json" sorts AFTER "….json", so collision-
-  suffixed backups survived longer than their siblings.
-  Current behaviour: sort by st_mtime via _safe_backup_mtime
-  helper (tolerates concurrent unlink race). BACKUP_KEEP still
-  enforced.
+ FIXED. Previously: sorted(glob) is string-
+ comparison — "…_1.json" sorts AFTER "….json", so collision-
+ suffixed backups survived longer than their siblings.
+ Current behaviour: sort by st_mtime via _safe_backup_mtime
+ helper (tolerates concurrent unlink race). BACKUP_KEEP still
+ enforced.
 
 D10. Trash folder is configurable 
-  Settings → Data safety → "Trash (deleted files)" allows picking
-  any folder as the trash destination, plus a retention spinner
-  (7..365 days). Defaults: DATA_DIR/trash, 7 days.
-  - set_trash_dir rejects empty, ".", "..", root ("/",
-  "C:\\"), and non-absolute paths — otherwise clean_trash
-  would iterdir over the whole drive / CWD, and
-  move_to_trash would fail on every file (PermissionError).
-  - clean_trash only removes files matching the trash
-  prefix (^mc_\d+_). Files without prefix in the trash folder are
-  untouched — user can point trash at a folder with other data
-  without fear (see D2 for full rationale).
-  - changing trash folder prompts a warning dialog
-  explaining that auto-cleanup will run inside this folder
-  (only prefixed files removed), and recommends a dedicated
-  empty folder. Cancel rolls back the label.
-  - Validation on change: set_trash_dir calls mkdir; on failure
-  (bad path / permission / disk) TRASH_DIR is left unchanged and
-  the UI label is rolled back to the real path.
-  - Retention is independent from cache retention (was previously
-  tied to auto_clean_days; splits them).
-  - Existing files in the OLD trash folder are NOT migrated when
-  the path changes. Undo still works because each action records
-  its own trash_path; old trash drains under its own retention
-  at the next launch where it is still the active trash.
-  - Hint in Settings warns: do NOT point trash inside your photo
-  library — trashed files may be re-scanned as originals.
-  Not a limitation — a documented feature. Kept here so reviewers
-  understand the trash-path variable and undo invariants.
+ Settings → Data safety → "Trash (deleted files)" allows picking
+ any folder as the trash destination, plus a retention spinner
+ (7..365 days). Defaults: DATA_DIR/trash, 7 days.
+ - set_trash_dir rejects empty, ".", "..", root ("/",
+ "C:\\"), and non-absolute paths — otherwise clean_trash
+ would iterdir over the whole drive / CWD, and
+ move_to_trash would fail on every file (PermissionError).
+ - clean_trash only removes files matching the trash
+ prefix (^mc_\d+_). Files without prefix in the trash folder are
+ untouched — user can point trash at a folder with other data
+ without fear (see D2 for full rationale).
+ - changing trash folder prompts a warning dialog
+ explaining that auto-cleanup will run inside this folder
+ (only prefixed files removed), and recommends a dedicated
+ empty folder. Cancel rolls back the label.
+ - Validation on change: set_trash_dir calls mkdir; on failure
+ (bad path / permission / disk) TRASH_DIR is left unchanged and
+ the UI label is rolled back to the real path.
+ - Retention is independent from cache retention (was previously
+ tied to auto_clean_days; splits them).
+ - Existing files in the OLD trash folder are NOT migrated when
+ the path changes. Undo still works because each action records
+ its own trash_path; old trash drains under its own retention
+ at the next launch where it is still the active trash.
+ - Hint in Settings warns: do NOT point trash inside your photo
+ library — trashed files may be re-scanned as originals.
+ Not a limitation — a documented feature. Kept here so reviewers
+ understand the trash-path variable and undo invariants.
 
 D9. force_clear_cache runs synchronously on UI thread
-  Scenario: Settings → "Clear cache now" with 10k+ files.
-  Result: window freezes ~50–200ms (HDD).
-  Not patched: not data-loss.
-  Tracked as NB-20.
+ Scenario: Settings → "Clear cache now" with 10k+ files.
+ Result: window freezes ~50–200ms (HDD).
+ Not patched: not data-loss.
+ Tracked internally.
+
+D11. PyInstaller rebuild after forced process kill (WinError -1 extraction)
+ Scenario: app was task-killed (e.g. via Task Manager) while an
+ onedir/onefile PyInstaller build was running; next launch fails
+ with "failed to extract win32\win32api.pyd: decompression resulted in
+ return code -1!" or similar.
+ Why: Windows can leave temporary extraction directories or locked DLLs
+ behind when the process is hard-killed. This is not an app bug.
+ Mitigation: log out and log back in (or reboot) to release OS file
+ locks, then start the app again.
 
 ================================================================================
-  E. VIDEO / EXIF / IMAGE FORMATS
+ E. VIDEO / EXIF / IMAGE FORMATS
 ================================================================================
 
 E1. HEIC rotation requires pillow-heif installed
-  Result: file untouched, user sees "HEIC: support unavailable".
-  Why: silent conversion to JPEG-with-.heic-extension corrupts file.
+ Result: file untouched, user sees "HEIC: support unavailable".
+ Why: silent conversion to JPEG-with-.heic-extension corrupts file.
 
 E2. HEIC can fail to load in fullscreen viewer without Qt HEIF plugin
-  Same as E1 mitigation (PIL fallback).
+ Same as E1 mitigation (PIL fallback).
 
 E3. EXIF sub-IFD write may lose DateTimeOriginal on Pillow < 9.2
-  Mitigation: warning logged. Update Pillow.
+ Mitigation: warning logged. Update Pillow.
 
 E4. get_exif_date does not parse subseconds or timezone offsets
-  Format lost: "2024:01:01 12:00:00+03:00" or "2024:01:01 12:00:00.123"
-  Cosmetic — rare format.
+ Format lost: "2024:01:01 12:00:00+03:00" or "2024:01:01 12:00:00.123"
+ Cosmetic — rare format.
 
 E5. HEIC thumbnails via PIL only; not via Qt's QImageReader
-  Cost: PIL path is slower than Qt native on some systems.
+ Cost: PIL path is slower than Qt native on some systems.
 
 E6. Video preview uses first frame (~10% in); no scrubbing
-  If video can't be opened: no thumbnail.
+ If video can't be opened: no thumbnail.
 
 E8. Pillow 9.0 cannot render thumbnails (Resampling added in 9.1)
-  Impact:  Image.Resampling.LANCZOS was introduced in Pillow
-  9.1; on 9.0 AttributeError is caught by
-  ThumbnailLoader except handler -> "..." or
-  "No preview" placeholder forever. No crash; no
-  data impact; only missing previews.
-  Why:  Hard requirement now documented in README (Pillow
-  >= 9.1). Fix would be a runtime fallback:
-  try: LANCZOS = Image.Resampling.LANCZOS except
-  AttributeError: LANCZOS = Image.LANCZOS. Not
-  worth the extra branch for a documented minimum.
-  Not a bug. Documented requirement.
+ Impact: Image.Resampling.LANCZOS was introduced in Pillow
+ 9.1; on 9.0 AttributeError is caught by
+ ThumbnailLoader except handler -> "..." or
+ "No preview" placeholder forever. No crash; no
+ data impact; only missing previews.
+ Why: Hard requirement now documented in README (Pillow
+ >= 9.1). Fix would be a runtime fallback:
+ try: LANCZOS = Image.Resampling.LANCZOS except
+ AttributeError: LANCZOS = Image.LANCZOS. Not
+ worth the extra branch for a documented minimum.
+ Not a bug. Documented requirement.
 
 E7. Transparent PNG/WebP thumbnails were permanently blank ("...")
-  FIXED (NB-04). Previously: ThumbnailLoader single-file path
-  called `img.tobytes("raw", "RGB")` on the fitted image without
-  `.convert("RGB")`. For non-RGB modes (RGBA, LA, P), Pillow raised
-  ValueError → caught by except Exception → "..." placeholder forever
-  (until re-open_gallery after a rotate).
-  Current behaviour: fitted image is `.convert("RGB")` before
-  tobytes — same as generate_quad_thumbnail and ImageViewer already did.
+ FIXED. Previously: ThumbnailLoader single-file path
+ called `img.tobytes("raw", "RGB")` on the fitted image without
+ `.convert("RGB")`. For non-RGB modes (RGBA, LA, P), Pillow raised
+ ValueError → caught by except Exception → "..." placeholder forever
+ (until re-open_gallery after a rotate).
+ Current behaviour: fitted image is `.convert("RGB")` before
+ tobytes — same as generate_quad_thumbnail and ImageViewer already did.
+
+E9. HEIC rotate is slow (HEVC encoding)
+ Scenario: rotate a HEIC/HEIF image in Viewer.
+ Result: operation takes 300–700ms (occasionally ~1.2s on HDD).
+ Why: HEIC uses HEVC codec for compression. HEVC encoding is
+ 5–10× slower than JPEG. Even Apple Photos takes 1–2s for a
+ single HEIC save on M1 hardware.
+ v1.1 optimizations:
+ - decode count reduced from 3× to 1× (single open,
+   materialized sub-IFD, in-memory pixmap for re-display)
+ - HEIC save quality lowered from q=95 to q=90 — HEVC encode
+   is ~20% faster; quality difference is visually
+   imperceptible for photos (HEVC is very efficient at high
+   quality levels)
+ - status bar shows "Saving rotated image…" during encode
+ - no busy cursor: cursor stays default so the operation
+   reads as "processing" rather than "frozen". An earlier
+   v1.1 attempt showed a WaitCursor during rotate — this made
+   the operation FEEL slower even though wall-clock time was
+   unchanged, so it was reverted.
+ Net result is ~3–4× faster than v1.0 in wall-clock time —
+ but the residual HEVC encoding step is unavoidable.
+ Not patched further: additional quality reduction would
+ become visible; JPEG conversion would be data-loss;
+ background rotation thread would introduce concurrency
+ risks.
+ Mitigation: rotate via external tools (Apple Photos,
+ Lightroom) if speed is critical.
 
 ================================================================================
-  F. UI / UX
+ F. UI / UX
 ================================================================================
 
 F1. Ctrl+Z/Ctrl+Y in Manager/Settings/Help tabs is ignored
-  Why: file undo only makes sense in Calendar/Gallery/Viewer.
+ Why: file undo only makes sense in Calendar/Gallery/Viewer.
 
 F2. Ctrl+Z on QSpinBox/QComboBox is ignored (not forwarded)
-  Why: spinbox "undo" is just typing history; combo has no undo.
+ Why: spinbox "undo" is just typing history; combo has no undo.
 
 F3. Paste into empty event shows "Cannot paste into empty event"
-  Why: no target folder exists yet for this event.
+ Why: no target folder exists yet for this event.
 
 F4. refresh_all_views after find_missing_files exits Duplicates view
-  Why: last_dups invalidated by purge; re-entering Duplicates requires
-  rescan.
+ Why: last_dups invalidated by purge; re-entering Duplicates requires
+ rescan.
 
 F5. Event cards show only events with ≥ 1 existing file
-  Why: filter avoids rendering "5 files" badge on a card that opens
-  to an empty gallery.
+ Why: filter avoids rendering "5 files" badge on a card that opens
+ to an empty gallery.
 
 F6. Empty calendar + Duplicates view → falls back to Days
-  No data issue.
+ No data issue.
 
 F7. Theme change: social buttons keep their gradient
-  Why: inline gradient QSS not touched by apply_styles. Cosmetic.
+ Why: inline gradient QSS not touched by apply_styles. Cosmetic.
 
 F8. "Export language template" exports template, not current language
-  Behavior is intentional (template for translators).
+ Behavior is intentional (template for translators).
 
 F9. Status bar counters may be approximate
-  Cosmetic — behavior of underlying operation is correct.
+ Cosmetic — behavior of underlying operation is correct.
 
 F10. Ctrl+A in GalleryWidget uses WindowShortcut context
-  FIXED (NB-05). Previously: focus in Settings or Help tab,
-  Ctrl+A reached GalleryWidget._select_all via WindowShortcut
-  and silently selected items in the hidden gallery list.
-  Current behaviour: _select_all returns early if
-  GalleryWidget.isVisible is False — Qt returns False for
-  non-active QStackedWidget pages, so Ctrl+A in Settings/Help no
-  longer propagates. In Days/Months/Years/Events/Duplicates
-  (gallery is the active page) Ctrl+A still works as before.
+ FIXED. Previously: focus in Settings or Help tab,
+ Ctrl+A reached GalleryWidget._select_all via WindowShortcut
+ and silently selected items in the hidden gallery list.
+ Current behaviour: _select_all returns early if
+ GalleryWidget.isVisible is False — Qt returns False for
+ non-active QStackedWidget pages, so Ctrl+A in Settings/Help no
+ longer propagates. In Days/Months/Years/Events/Duplicates
+ (gallery is the active page) Ctrl+A still works as before.
 
 F11. change_view_mode: btn_rescan_dups stays visible after fallback
-  FIXED (NB-14). Previously: Duplicates view → calendar
-  becomes empty → auto-fallback to Days; currentIndexChanged was
-  blocked so change_view_mode(0) never ran and the "Rescan" button
-  stayed visible in Days until the next user click.
-  Current behaviour: the fallback branch calls
-  self.btn_rescan_dups.hide explicitly.
+ FIXED. Previously: Duplicates view → calendar
+ becomes empty → auto-fallback to Days; currentIndexChanged was
+ blocked so change_view_mode(0) never ran and the "Rescan" button
+ stayed visible in Days until the next user click.
+ Current behaviour: the fallback branch calls
+ self.btn_rescan_dups.hide explicitly.
 
 F12. _rebuild_translatable_widgets: idx == -1 loses widget position
-  FIXED (NB-06). Previously: if settings_view was already
-  detached from the stack (double-fired language_changed, or
-  deleteLater race), idx == -1 and the newly created widget was
-  orphaned — Settings tab showed empty/wrong widget.
-  Current behaviour: if idx < 0, insert at stack.count and
-  log a warning. Same for manager_view. Happy path unchanged.
+ FIXED. Previously: if settings_view was already
+ detached from the stack (double-fired language_changed, or
+ deleteLater race), idx == -1 and the newly created widget was
+ orphaned — Settings tab showed empty/wrong widget.
+ Current behaviour: if idx < 0, insert at stack.count and
+ log a warning. Same for manager_view. Happy path unchanged.
 
 F13. paste_files overwrite: window where dest is absent
-  Scenario: overwrite confirmed → move_to_trash(dest) succeeds →
-  shutil.copy2 fails (disk full, I/O error).
-  Result: dest is in trash, new file not created. User sees "file
-  missing" until Ctrl+Z (restores from trash).
-  Why: trash-before-write is required for safe undo.
-  Data is preserved in trash. Not data-loss.
+ Scenario: overwrite confirmed → move_to_trash(dest) succeeds →
+ shutil.copy2 fails (disk full, I/O error).
+ Result: dest is in trash, new file not created. User sees "file
+ missing" until Ctrl+Z (restores from trash).
+ Why: trash-before-write is required for safe undo.
+ Data is preserved in trash. Not data-loss.
 
 F14. on_gallery_delete_dups used defaultButton=Yes for multi-file
-  FIXED (NB-02). Previously: default Button was Yes regardless
-  of N. Users pressing Enter without reading could mass-move all
-  duplicates to trash; if user performed ≥ undo_limit actions before
-  Ctrl+Z, undo would roll off and recovery required manual trash dig
-  (auto-clean 7 days).
-  Current behaviour: default Yes for N==1 (trivial undo), No for
-  N>1 — same rule as delete_selected_files .
+ FIXED. Previously: default Button was Yes regardless
+ of N. Users pressing Enter without reading could mass-move all
+ duplicates to trash; if user performed ≥ undo_limit actions before
+ Ctrl+Z, undo would roll off and recovery required manual trash dig
+ (auto-clean 7 days).
+ Current behaviour: default Yes for N==1 (trivial undo), No for
+ N>1 — same rule as delete_selected_files.
 
 F15. Ctrl+Z from modal non-text widget triggers file undo
-  FIXED (NB-15). Previously: AssignEventDialog / QInputDialog
-  with focus on OK button (not in QLineEdit) → Ctrl+Z reached
-  MainWindow.undo. File undo executed while dialog was open.
-  Current behaviour: undo/redo check QApplication.
-  activeModalWidget after text-widget forwarding and spin/combo
-  ignore; if a modal is open (and not self), return. Text-widget
-  Ctrl+Z inside the modal still forwards to local undo.
+ FIXED. Previously: AssignEventDialog / QInputDialog
+ with focus on OK button (not in QLineEdit) → Ctrl+Z reached
+ MainWindow.undo. File undo executed while dialog was open.
+ Current behaviour: undo/redo check QApplication.
+ activeModalWidget after text-widget forwarding and spin/combo
+ ignore; if a modal is open (and not self), return. Text-widget
+ Ctrl+Z inside the modal still forwards to local undo.
 
 F16. Modal dialog opened during _busy re-enters undo/redo timers
-  Note: this is the opposite of F15 — while a modal dialog is up,
-  _busy=True (e.g., inside delete_selected_files), and Ctrl+Z is
-  blocked by _busy_guard. Net effect: no data corruption.
-  Documented for reviewers.
+ Note: this is the opposite of F15 — while a modal dialog is up,
+ _busy=True (e.g., inside delete_selected_files), and Ctrl+Z is
+ blocked by _busy_guard. Net effect: no data corruption.
+ Documented for reviewers.
 
 F18. CalendarManagerWidget.list_events showed white box in dark theme
-  FIXED. Previously: list_events (QListWidget) had no
-  explicit setStyleSheet. In Fusion dark theme, QListWidget falls
-  back to default palette Base color (white, since setPalette is
-  never called) — visible as a stark white box inside the grey
-  Manage → Events panel. Other QListWidgets (Settings priority
-  list, GalleryListWidget) set their own style; this one was
-  missed. Current behaviour: explicit QListWidget style
-  in CalendarManagerWidget.update_theme, matching SettingsWidget
-  for consistency. Cosmetic — no data impact.
+ FIXED. Previously: list_events (QListWidget) had no
+ explicit setStyleSheet. In Fusion dark theme, QListWidget falls
+ back to default palette Base color (white, since setPalette is
+ never called) — visible as a stark white box inside the grey
+ Manage → Events panel. Other QListWidgets (Settings priority
+ list, GalleryListWidget) set their own style; this one was
+ missed. Current behaviour: explicit QListWidget style
+ in CalendarManagerWidget.update_theme, matching SettingsWidget
+ for consistency. Cosmetic — no data impact.
 
 F19. find_missing_files had no progress feedback
-  FIXED. Previously: iterating cal_data × os.path.exists
-  on a 10k+ library (especially HDD or network drive) froze the
-  window for several seconds with no visible activity — users
-  assumed the app had hung. Current behaviour: pre-count
-  total entries (O(lists), no I/O), show determinate progress
-  bar ("N / M"), call _process_ui every 200 files to let the
-  bar paint. Determinate, cancellable by Finish button
-  (project rule: no user-initiated cancel needed). Cosmetic —
-  no data impact.
+ FIXED. Previously: iterating cal_data × os.path.exists
+ on a 10k+ library (especially HDD or network drive) froze the
+ window for several seconds with no visible activity — users
+ assumed the app had hung. Current behaviour: pre-count
+ total entries (O(lists), no I/O), show determinate progress
+ bar ("N / M"), call _process_ui every 200 files to let the
+ bar paint. Determinate, cancellable by Finish button
+ (project rule: no user-initiated cancel needed). Cosmetic —
+ no data impact.
 
-F17. Safe media add  — two-level scan protection
-  While a folder scan is running (self._scan_in_progress == True),
-  two levels of protection apply:
-  LEVEL 1 (always):
-  Destructive operations are BLOCKED with a status-bar message
-  "Please wait — scan in progress" (2s). Blocked ops:
-  delete_selected_files, paste_files, undo, redo,
-  on_gallery_delete_dups, find_missing_files,
-  restore_from_backup, _on_files_moved_externally,
-  clear_calendar, delete_calendar, rename_calendar,
-  load_external_calendar, import_folder, change_view_mode(4)
-  (entry to Duplicates view is also blocked — parallel
-  dup-scan would cause I/O thrash + unreliable file set).
-  Navigation, gallery, viewer, viewer ←/→, zoom, settings,
-  copy/cut (clipboard only — paste is blocked), event
-  create/rename/delete, assign_category, remove_from_event —
-  all allowed. None of them set _busy or touch _scanned_files,
-  so no race with the scan merge.
-  LEVEL 2 (opt-in, default ON):
-  Settings → Data safety → "Safe media add: block UI above [N]
-  media file(s)". Default ON, threshold 50 (range 10..10000).
-  When total > threshold, a modal ScanProgressDialog opens:
-  "Adding media files / Please wait while media files are
-  being added to the calendar…" with a progress bar and
-  Cancel button. The whole MainWindow is locked while open.
-  Cancel / Esc / ✕ all abort the scan (treated as scan
-  cancellation, NOT as app close); the dialog closes
-  automatically after merge finishes.
-  Esc now genuinely cancels — previously QDialog::reject
-  hid the dialog without emitting cancel_requested, leaving
-  the scan running with no UI. Also: ScanProgressDialog opens
-  ONLY for main scan (ScannerThread) — never for
-  DuplicateScanThread. update_progress is shared between both
-  threads; without the _scan_in_progress guard dup-scan would
-  open the modal dialog and Cancel would not stop it.
-  Cross-effect: NB-26 (QTimer-drop race between scan_finished
-  and closeEvent) is architecturally eliminated — _busy cannot
-  become True during a scan → scan_finished never defers →
-  QTimer.singleShot(200) is never scheduled during scan →
-  no QTimer to drop. See I33.
+F17. Safe media add — two-level scan protection
+ While a folder scan is running (self._scan_in_progress == True),
+ two levels of protection apply:
+ LEVEL 1 (always):
+ Destructive operations are BLOCKED with a status-bar message
+ "Please wait — scan in progress" (2s). Blocked ops:
+ delete_selected_files, paste_files, undo, redo,
+ on_gallery_delete_dups, find_missing_files,
+ restore_from_backup, _on_files_moved_externally,
+ clear_calendar, delete_calendar, rename_calendar,
+ load_external_calendar, import_folder, change_view_mode(4)
+ (entry to Duplicates view is also blocked — parallel
+ dup-scan would cause I/O thrash + unreliable file set).
+ Navigation, gallery, viewer, viewer ←/→, zoom, settings,
+ copy/cut (clipboard only — paste is blocked), event
+ create/rename/delete, assign_category, remove_from_event —
+ all allowed. None of them set _busy or touch _scanned_files,
+ so no race with the scan merge.
+ LEVEL 2 (opt-in, default ON):
+ Settings → Data safety → "Safe media add: block UI above [N]
+ media file(s)". Default ON, threshold 50 (range 10..10000).
+ When total > threshold, a modal ScanProgressDialog opens:
+ "Adding media files / Please wait while media files are
+ being added to the calendar…" with a progress bar and
+ Cancel button. The whole MainWindow is locked while open.
+ Cancel / Esc / ✕ all abort the scan (treated as scan
+ cancellation, NOT as app close); the dialog closes
+ automatically after merge finishes.
+ Esc now genuinely cancels — previously QDialog::reject
+ hid the dialog without emitting cancel_requested, leaving
+ the scan running with no UI. Also: ScanProgressDialog opens
+ ONLY for main scan (ScannerThread) — never for
+ DuplicateScanThread. update_progress is shared between both
+ threads; without the _scan_in_progress guard dup-scan would
+ open the modal dialog and Cancel would not stop it.
+ Cross-effect: internal (QTimer-drop race between scan_finished
+ and closeEvent) is architecturally eliminated — _busy cannot
+ become True during a scan → scan_finished never defers →
+ QTimer.singleShot(200) is never scheduled during scan →
+ no QTimer to drop. See I33.
 
-  Known interaction:
-  - If the checkbox is OFF, LEVEL 2 is skipped — LEVEL 1 still
-  applies (destructive ops remain blocked during scan).
-  - If total == 0 (empty folder) or total <= threshold, no
-  modal dialog appears; only the status-bar progress indicator
-  (same as pre-behaviour), but LEVEL 1 blocking is active.
-  - Duplicates view cannot be entered during a main-scan; the
-  combo stays on the current mode with a status message.
-  - This is a behaviour change, not a limitation — documented
-  here so reviewers understand why destructive ops are
-  temporarily no-op during scans.
+ Known interaction:
+ - If the checkbox is OFF, LEVEL 2 is skipped — LEVEL 1 still
+ applies (destructive ops remain blocked during scan).
+ - If total == 0 (empty folder) or total <= threshold, no
+ modal dialog appears; only the status-bar progress indicator
+ (same as pre-behaviour), but LEVEL 1 blocking is active.
+ - Duplicates view cannot be entered during a main-scan; the
+ combo stays on the current mode with a status message.
+ - This is a behaviour change, not a limitation — documented
+ here so reviewers understand why destructive ops are
+ temporarily no-op during scans.
+
+F20. Progress-bar text was invisible in dark theme
+ FIXED in v1.1. Previously: QProgressBar text used COLOR_TEXT
+ (light gray #f5f5f5 in dark theme) over COLOR_PRIMARY chunk
+ (#e0e0e0 — also light gray). Percentage numbers disappeared
+ as soon as the bar filled (visible only in the empty
+ portion). Same bug in ResortProgressDialog,
+ ScanProgressDialog, and the status-bar progress bar.
+ Current behaviour: dedicated COLOR_PROGRESS_TEXT per theme
+ (light: #1f2937; dark: #b8860b — dark yellow for readability
+ on the light chunk). Font weight bumped to 600.
+
+F21. Background preview generation progress bar
+ FIXED in v1.1. Issues resolved:
+ 1. Indeterminate spinner (setRange(0, 0)) that could stay
+ visible forever if bg_thumb_gen was toggled off mid-run:
+ _bg_pool.clear() removes queued tasks but not the
+ _bg_pending counter, so _update_bg_progress kept seeing
+ "still active" and never hid the bar. Also _load_visible
+ kept restarting the 50ms timer forever when bg was off
+ and only off-screen items remained (CPU waste).
+ 2. QRunnable has no.deleteLater() — the previous cleanup
+ code raised AttributeError on every thumbnail load.
+ 3. Progress bar constantly reset to 0 when navigating modes.
+ 4. Progress bar showed up even when the "Generate previews
+ in background" checkbox was disabled.
+ Current behaviour:
+ - Calendar modes: indeterminate spinner with a text counter
+ ("Background previews: N generated") that does not jump.
+ - Gallery mode: determinate X/Y progress, precomputed by a
+ background thread (PreviewCounterThread) when the gallery
+ opens. Smoothly increments to completion.
+ - Strictly respects the checkbox. No background threads,
+ no progress bar, and no PreviewCounterThread launches if
+ the option is disabled.
+ - Safely handles toggling mid-run and switching calendars
+ without UI jitter (via generation IDs).
 
 ================================================================================
-  G. TECHNICAL / INFRASTRUCTURE
+ G. TECHNICAL / INFRASTRUCTURE
 ================================================================================
 
 G1. _process_ui uses ExcludeUserInputEvents, not queued-signal exclusion
-  Why: full processEvents block would freeze progress bar; guard is at
-  scan_finished/on_duplicates_found via _busy check + 200ms defer.
+ Why: full processEvents block would freeze progress bar; guard is at
+ scan_finished/on_duplicates_found via _busy check + 200ms defer.
 
 G2. cv2.VideoCapture may hang on broken/network files
-  Mitigation: daemon thread + 5s join timeout; semaphore (4 concurrent)
-  prevents full UI freeze; leaked semaphore on hang means
-  video previews stop for that session.
-  Requires subprocess-based isolation to fully fix (work item).
+ Mitigation: daemon thread + 5s join timeout; semaphore (4 concurrent)
+ prevents full UI freeze; leaked semaphore on hang means
+ video previews stop for that session.
+ Requires subprocess-based isolation to fully fix (work item).
 
 G3. QThread.terminate in closeEvent after 15s timeout
-  Why: better than QThread-UB crash on exit. Last resort.
+ Why: better than QThread-UB crash on exit. Last resort.
 
 G4. First save with `_last_saved_count == -1` calls _count_files_in_json
-  Cosmetic — one extra disk read on very first run.
+ Cosmetic — one extra disk read on very first run.
 
 G5. _save_timer debounce 500ms
-  Scenario: hard kill -9 / power loss within 500ms of last action.
-  Result: last 500ms of changes lost (but closeEvent flushes before exit).
+ Scenario: hard kill -9 / power loss within 500ms of last action.
+ Result: last 500ms of changes lost (but closeEvent flushes before exit).
 
 G6. _purge_paths_bulk / _purge_specific_paths have no try/except
-  Why: categories guaranteed to be list after _sanitize_calendars.
+ Why: categories guaranteed to be list after _sanitize_calendars.
 
 G7. Two purge helpers (_purge_paths_bulk, _purge_specific_paths) coexist
-  Why: bulk doesn't return count; specific returns count for cut-watch.
+ Why: bulk doesn't return count; specific returns count for cut-watch.
 
 G8. Two dead helpers in codebase
-  - _purge_missing_files_in_current_cal: removed in .
-  - date_re in _sanitize_calendars: unused since strptime switch.
-  Harmless.
+ - _purge_missing_files_in_current_cal: removed in v1.0.
+ - date_re in _sanitize_calendars: unused since strptime switch.
+ Harmless.
 
 G9. Logger.info from undo/redo on every invocation
-  Why: diagnostic — focus class, history depth, busy state.
+ Why: diagnostic — focus class, history depth, busy state.
 
 G10. QPolygonF uses QPointF explicitly (was QPoint)
-  Fixed .
+ Fixed.
 
 G11. DuplicateScanThread progress uses two different bases
-  Scenario: sizing phase emits (i, total_files); hashing phase emits
-  (done, total_hash). update_progress only resets range
-  when maximum==0 → percentage appears stalled during
-  phase transition.
-  Cosmetic — UX only. Tracked as NB-09.
+ Scenario: sizing phase emits (i, total_files); hashing phase emits
+ (done, total_hash). update_progress only resets range
+ when maximum==0 → percentage appears stalled during
+ phase transition.
+ Cosmetic — UX only. Tracked internally.
 
 G12. get_file_hash chunked reads ignored cancellation
-  FIXED (NB-10). Previously: cancel dup-scan while hashing
-  a 4 GB video → DuplicateScanThread.stop waited up to 5s, and
-  the read loop continued until the current file finished (could
-  be minutes). Current behaviour: get_file_hash accepts an
-  optional running_check callable; DuplicateScanThread passes
-  lambda: self._running. Abort checks happen between 4 MB chunks.
-  Read-only — no data-loss ever existed.
+ FIXED. Previously: cancel dup-scan while hashing
+ a 4 GB video → DuplicateScanThread.stop waited up to 5s, and
+ the read loop continued until the current file finished (could
+ be minutes). Current behaviour: get_file_hash accepts an
+ optional running_check callable; DuplicateScanThread passes
+ lambda: self._running. Abort checks happen between 4 MB chunks.
+ Read-only — no data-loss ever existed.
 
 G13. CalendarCardItem.paint checks `if self.pixmap` but not isNull
-  FIXED (NB-11). Previously: Null QPixmap is truthy in Qt,
-  so .scaled ran on null, drew nothing and wasted CPU.
-  Current behaviour: explicit `is not None and not
-  isNull` check — null pixmap now correctly falls into the
-  "No preview" placeholder branch.
+ FIXED. Previously: Null QPixmap is truthy in Qt,
+ so.scaled ran on null, drew nothing and wasted CPU.
+ Current behaviour: explicit `is not None and not
+ isNull` check — null pixmap now correctly falls into the
+ "No preview" placeholder branch.
 
 G14. draw_days creates 3650+ QGraphicsItems for a 10-year library
-  No virtualization. Performance, not correctness.
+ No virtualization. Performance, not correctness.
 
 G15. ImageViewer.delete_current is not decorated with @_busy_guard
-  Scenario: user presses Delete in viewer → QMessageBox.question spins
-  nested loop → _cut_watch_timer (1.5s) may fire →
-  _watch_cut_files sees stack==5, may call _on_viewer_back.
-  Result: on return from dialog, current_index may have shifted.
-  self.files.pop(current_index) removes wrong entry from local
-  list — file_deleted signal uses correct pre-dialog fp.
-  Impact: viewer list may skip one entry; calendar data is correct.
-  Tracked as NB-12.
+ Scenario: user presses Delete in viewer → QMessageBox.question spins
+ nested loop → _cut_watch_timer (1.5s) may fire →
+ _watch_cut_files sees stack==5, may call _on_viewer_back.
+ Result: on return from dialog, current_index may have shifted.
+ self.files.pop(current_index) removes wrong entry from local
+ list — file_deleted signal uses correct pre-dialog fp.
+ Impact: viewer list may skip one entry; calendar data is correct.
+ Tracked internally.
 
 G16. Per-widget QThreadPools
-  CalendarView, GalleryListWidget, DuplicateGalleryWidget each create
-  QThreadPool(maxThreadCount=4). Peak = up to 12–16 threads + global.
-  Suboptimal on HDD (I/O thrash); behaviour is correct.
+ CalendarView, GalleryListWidget, DuplicateGalleryWidget each create
+ QThreadPool(maxThreadCount=4). Peak = up to 12–16 threads + global.
+ Suboptimal on HDD (I/O thrash); behaviour is correct.
 
 G17. ThumbnailLoader single-file: no `_pending` retry after failed
-  load
-  FIXED (NB-13). Previously: transient read errors (auto-
-  clean race, AV lock, network blip) left the card at "..." until
-  next scroll/resize/reopen. Current behaviour: GalleryListWidget
-  keeps _retry_done set; _on_thumb on null QImage re-queues the
-  file once (cap 1 per file) via _schedule. Entries cleared in
-  clear_all and remove_item_by_filepath.
+ load
+ FIXED. Previously: transient read errors (auto-
+ clean race, AV lock, network blip) left the card at "..." until
+ next scroll/resize/reopen. Current behaviour: GalleryListWidget
+ keeps _retry_done set; _on_thumb on null QImage re-queues the
+ file once (cap 1 per file) via _schedule. Entries cleared in
+ clear_all and remove_item_by_filepath.
 
-G18. Image.fromarray without .copy in _extract_video_frame
-  FIXED (NB-19). Pillow today copies the ndarray buffer
-  internally, but future versions may not — explicit .copy
-  removes the dependency on undocumented behaviour.
-  Cost: one extra allocation per video frame (~6 MB at 1080p,
-  ≤24 MB peak across 4 parallel workers). Negligible.
+G18. Image.fromarray without.copy in _extract_video_frame
+ FIXED. Pillow today copies the ndarray buffer
+ internally, but future versions may not — explicit.copy
+ removes the dependency on undocumented behaviour.
+ Cost: one extra allocation per video frame (~6 MB at 1080p,
+ ≤24 MB peak across 4 parallel workers). Negligible.
 
 G19. save_state_for_undo runs before target_name validation in
-  scan_finished → empty undo entry possible when target calendar was
-  deleted mid-scan.
-  FIXED (NB-17). Current behaviour: save_state_for_undo
-  runs only AFTER target_name is validated. Mid-scan deletion no
-  longer pushes a phantom undo step. Happy path unchanged.
-  B4 is now historical; kept for reference.
+ scan_finished → empty undo entry possible when target calendar was
+ deleted mid-scan.
+ FIXED. Current behaviour: save_state_for_undo
+ runs only AFTER target_name is validated. Mid-scan deletion no
+ longer pushes a phantom undo step. Happy path unchanged.
+ B4 is now historical; kept for reference.
 
-  (NB-17b): also skip when _scanned_files is empty. A scan
-  that found 0 new files (folder already in calendar) would
-  otherwise push an undo step that Ctrl+Z silently no-ops — user
-  thinks undo is broken. Now: no files found → no undo step.
+ (NB-17b): also skip when _scanned_files is empty. A scan
+ that found 0 new files (folder already in calendar) would
+ otherwise push an undo step that Ctrl+Z silently no-ops — user
+ thinks undo is broken. Now: no files found → no undo step.
 
 G20. QTimer.singleShot(200, retry) in scan_finished / on_duplicates_found
-  has no attempt cap. If _busy stays True for a long time (user frozen
-  on a modal), the retry logs every 200ms. Cosmetic / log noise.
-  Tracked as NB-18.
+ has no attempt cap. If _busy stays True for a long time (user frozen
+ on a modal), the retry logs every 200ms. Cosmetic / log noise.
+ Tracked internally.
 
 G21. _backup_calendar_data runs synchronously on UI thread (via
-  _save_timer.timeout → _do_save_json). For a 10 MB JSON ≈ 50–100 ms.
-  Negligible today; monitor if state size grows.
+ _save_timer.timeout → _do_save_json). For a 10 MB JSON ≈ 50–100 ms.
+ Negligible today; monitor if state size grows.
 
 G22. CalendarView._load_visible re-armed the load timer even with
-  loaded==0.
-  FIXED (NB-23). Previously: if every pending item was
-  off-screen, the 50 ms timer restarted unconditionally and each
-  tick did O(n) sceneBoundingRect calls — noticeable on large
-  libraries (10+ year calendar = 3650+ cards).
-  Current behaviour: `if self._pending and loaded > 0:` —
-  off-screen-only ticks no longer re-arm. Scroll/resize/start_
-  loading still call _schedule, so previews load normally on
-  viewport change.
+ loaded==0.
+ FIXED. Previously: if every pending item was
+ off-screen, the 50 ms timer restarted unconditionally and each
+ tick did O(n) sceneBoundingRect calls — noticeable on large
+ libraries (10+ year calendar = 3650+ cards).
+ Current behaviour: `if self._pending and loaded > 0:` —
+ off-screen-only ticks no longer re-arm. Scroll/resize/start_
+ loading still call _schedule, so previews load normally on
+ viewport change.
 
 G23. ScannerThread counting phase ignored cancellation
-  FIXED (NB-30). Previously: the first os.walk (counting
-  total files, no I/O aside from directory reads) had no
-  `if not self._running: return` check. Cancel during counting
-  phase → stop waited up to 5s, cancel_scan returned False,
-  ScanProgressDialog stayed up with Cancel button disabled.
-  Particularly bad on network drives where counting alone can
-  take 10+ seconds.
-  Current behaviour: counting loop checks _running per
-  directory; abort returns immediately. cancel_scan now actually
-  cancels within ~1 tick.
+ FIXED. Previously: the first os.walk (counting
+ total files, no I/O aside from directory reads) had no
+ `if not self._running: return` check. Cancel during counting
+ phase → stop waited up to 5s, cancel_scan returned False,
+ ScanProgressDialog stayed up with Cancel button disabled.
+ Particularly bad on network drives where counting alone can
+ take 10+ seconds.
+ Current behaviour: counting loop checks _running per
+ directory; abort returns immediately. cancel_scan now actually
+ cancels within ~1 tick.
 
 G24. load_config did not sanitize numeric / bool config fields
-  FIXED (NB-32). Previously: a corrupted config.json with
-  e.g. `"dups_per_row": "abc"` would ValueError inside
-  open_duplicates_gallery (silent no-op with PySide6 exception
-  swallowing, but UI stayed on previous view). `"safe_delete_enabled":
-  0` was treated as ENABLED — the `is not False` check only
-  recognizes Python False, and 0 is not False in Python; JSON
-  0 decoded as int 0 → truthy for that check.
-  Current behaviour: load_config clamps numeric fields
-  (auto_clean_days, dups_per_row, safe_delete_threshold,
-  safe_media_add_threshold, trash_retention_days) and coerces
-  bool fields via explicit false-y check (False/0/"0"/"false"/
-  "False" → disabled; anything else → enabled, safe default).
+ FIXED. Previously: a corrupted config.json with
+ e.g. `"dups_per_row": "abc"` would ValueError inside
+ open_duplicates_gallery (silent no-op with PySide6 exception
+ swallowing, but UI stayed on previous view). `"safe_delete_enabled":
+ 0` was treated as ENABLED — the `is not False` check only
+ recognizes Python False, and 0 is not False in Python; JSON
+ 0 decoded as int 0 → truthy for that check.
+ Current behaviour: load_config clamps numeric fields
+ (auto_clean_days, dups_per_row, safe_delete_threshold,
+ safe_media_add_threshold, trash_retention_days) and coerces
+ bool fields via explicit false-y check (False/0/"0"/"false"/
+ "False" → disabled; anything else → enabled, safe default).
 
 G25. auto_clean_enabled=False also disabled trash auto-clean
-  FIXED (NB-33). D10 said "trash retention is independent
-  from cache retention", but the code gated _AutoCleanWorker
-  creation on auto_clean_enabled — turning off cache cleanup
-  silently stopped trash retention too.
-  Current behaviour: _AutoCleanWorker always starts;
-  cache_days=0 signals "skip cache"; trash_days is always
-  positive (7..365). Both genuinely independent.
+ FIXED. D10 said "trash retention is independent
+ from cache retention", but the code gated _AutoCleanWorker
+ creation on auto_clean_enabled — turning off cache cleanup
+ silently stopped trash retention too.
+ Current behaviour: _AutoCleanWorker always starts;
+ cache_days=0 signals "skip cache"; trash_days is always
+ positive (7..365). Both genuinely independent.
 
 G26. start_scanning had no try/finally + no dup-scan guard
-  FIXED (NB-35 + NB-37). Two issues:
-  - NB-35: if ScannerThread constructor or .start raised
-  (rare but possible), _scan_in_progress stayed True and
-  destructive ops were blocked until app restart.
-  - NB-37: import_folder/start_scanning did not check
-  dup_thread.isRunning — a main-scan could be started
-  mid-dup-scan → I/O thrash and unreliable last_dups write.
-  Current behaviour: whole setup wrapped in try/except with
-  _end_scan on failure; early return with status_busy if
-  dup_thread is running.
+ FIXED (NB-35 + NB-37). Two issues:
+ - if ScannerThread constructor or.start raised
+ (rare but possible), _scan_in_progress stayed True and
+ destructive ops were blocked until app restart.
+ - import_folder/start_scanning did not check
+ dup_thread.isRunning — a main-scan could be started
+ mid-dup-scan → I/O thrash and unreliable last_dups write.
+ Current behaviour: whole setup wrapped in try/except with
+ _end_scan on failure; early return with status_busy if
+ dup_thread is running.
 
 G27. _sanitize_calendars accepted non-canonical date strings
-  FIXED (NB-38). Previously: datetime.strptime(k, "%Y-%m-%d")
-  accepts "2024-1-1" (leading zeros optional in strptime), but
-  draw_days / draw_months filter by ^\d{4}-\d{2}-\d{2}$, so such
-  entries silently disappeared from calendar views. Current
-  behaviour: roundtrip check — _dt.strftime("%Y-%m-%d") must
-  equal the original key; non-canonical entries are dropped by
-  sanitize (with warning). User can still restore from backup if
-  needed. Cosmetic — not data-loss.
+ FIXED. Previously: datetime.strptime(k, "%Y-%m-%d")
+ accepts "2024-1-1" (leading zeros optional in strptime), but
+ draw_days / draw_months filter by ^\d{4}-\d{2}-\d{2}$, so such
+ entries silently disappeared from calendar views. Current
+ behaviour: roundtrip check — _dt.strftime("%Y-%m-%d") must
+ equal the original key; non-canonical entries are dropped by
+ sanitize (with warning). User can still restore from backup if
+ needed. Cosmetic — not data-loss.
 
 G31. cache_dir root accepted → drive-root *.jpg wipe
-  FIXED (P0 data-loss). Previously: load_config only
-  rejected "" and "." for cache_dir; a corrupted config with
-  "cache_dir": "C:\\" (or "/") passed validation, then
-  clear_cache / _AutoCleanWorker / get_cache_path globbed
-  *.jpg in the drive root and unlinked every JPG there. Same
-  class as (CWD wipe) but at drive-root level. Current:
-  load_config additionally rejects root (_cp.parent == _cp);
-  each consumer independently guards root as defence-in-depth;
-  on_cache_settings_changed validates cache_dir symmetrically
-  (UI-set root would otherwise bypass the load-time guard).
+ FIXED (P0 data-loss). Previously: load_config only
+ rejected "" and "." for cache_dir; a corrupted config with
+ "cache_dir": "C:\\" (or "/") passed validation, then
+ clear_cache / _AutoCleanWorker / get_cache_path globbed
+ *.jpg in the drive root and unlinked every JPG there. Same
+ class as (CWD wipe) but at drive-root level. Current:
+ load_config additionally rejects root (_cp.parent == _cp);
+ each consumer independently guards root as defence-in-depth;
+ on_cache_settings_changed validates cache_dir symmetrically
+ (UI-set root would otherwise bypass the load-time guard).
 
 G32. move_to_trash: disk offline reported as successful deletion
-  FIXED (P1). Previously: `if not os.path.exists(
-  filepath): return True, None, None` treated "missing" as
-  "already deleted" — including the case where the entire
-  external drive was disconnected. Result: user deletes from
-  gallery with a disconnected drive → calendar purges the
-  entry, file still on disk. Current: after exists==False,
-  checks parent-dir accessibility (same defence as
-  _watch_cut_files / A2). If parent inaccessible, returns
-  (False, None, "parent inaccessible") so caller shows
-  "Could not delete" and the entry is preserved.
+ FIXED (P1). Previously: `if not os.path.exists(
+ filepath): return True, None, None` treated "missing" as
+ "already deleted" — including the case where the entire
+ external drive was disconnected. Result: user deletes from
+ gallery with a disconnected drive → calendar purges the
+ entry, file still on disk. Current: after exists==False,
+ checks parent-dir accessibility (same defence as
+ _watch_cut_files / A2). If parent inaccessible, returns
+ (False, None, "parent inaccessible") so caller shows
+ "Could not delete" and the entry is preserved.
 
 G33. find_missing_files purged on disconnect between dialog and
-  purge
-  FIXED (P1). Previously: if external drive disconnected
-  while confirm dialog was open, re-check loop `if not
-  os.path.exists(f): all_missing.append(f)` added EVERY file
-  to purge list (exists False on all) → whole calendar
-  purged on Yes. Undo saved data but user panicked. Current:
-  same parent-dir accessibility check — file added to
-  all_missing only if parent exists AND is readable. Files
-  on disconnected drives are preserved; user reruns Find
-  missing after reconnecting.
+ purge
+ FIXED (P1). Previously: if external drive disconnected
+ while confirm dialog was open, re-check loop `if not
+ os.path.exists(f): all_missing.append(f)` added EVERY file
+ to purge list (exists False on all) → whole calendar
+ purged on Yes. Undo saved data but user panicked. Current:
+ same parent-dir accessibility check — file added to
+ all_missing only if parent exists AND is readable. Files
+ on disconnected drives are preserved; user reruns Find
+ missing after reconnecting.
 
 G34. _busy_guard violated invariant "_busy never True during
-  scan"
-  FIXED. Previously: @_busy_guard set _busy=True then
-  called method; method's own _guard_scan returned early,
-  but there was a microsecond window where _busy=True during
-  a scan. If scan_finished queued in that window, it would
-  defer via QTimer.singleShot(200) — the pattern architecturally eliminated. In practice never fired (method
-  returned immediately), but the invariant was not enforced.
-  Current: wrapper checks _scan_in_progress BEFORE setting
-  _busy; on scan-in-progress returns early with status
-  message. No _busy=True is ever set during a scan.
+ scan"
+ FIXED. Previously: @_busy_guard set _busy=True then
+ called method; method's own _guard_scan returned early,
+ but there was a microsecond window where _busy=True during
+ a scan. If scan_finished queued in that window, it would
+ defer via QTimer.singleShot(200) — the pattern architecturally eliminated. In practice never fired (method
+ returned immediately), but the invariant was not enforced.
+ Current: wrapper checks _scan_in_progress BEFORE setting
+ _busy; on scan-in-progress returns early with status
+ message. No _busy=True is ever set during a scan.
 
 G35. ScanProgressDialog.close was ignored (unconditional
-  event.ignore)
-  FIXED. Previously: _close_scan_dialog called
-  dlg.close, but closeEvent always event.ignore-ed —
-  dialog stayed visible until deleteLater ran on next event
-  loop iteration. UX: dialog appeared stuck for 50-500ms
-  after scan completed. Current: _close_scan_dialog sets
-  dlg._force_close=True before close; closeEvent checks
-  the flag and event.accept-s. Dialog hides instantly.
+ event.ignore)
+ FIXED. Previously: _close_scan_dialog called
+ dlg.close, but closeEvent always event.ignore-ed —
+ dialog stayed visible until deleteLater ran on next event
+ loop iteration. UX: dialog appeared stuck for 50-500ms
+ after scan completed. Current: _close_scan_dialog sets
+ dlg._force_close=True before close; closeEvent checks
+ the flag and event.accept-s. Dialog hides instantly.
 
 G36. get_file_hash sampled-path did not check running_check
-  FIXED (extends NB-10 / G12). Previously: for photos
-  >6 MB (sampled path: 2MB head + 2MB middle + 2MB tail),
-  running_check was only consulted in the full-hash branch.
-  Cancelling a dup-scan on a slow network drive would wait
-  up to 6 MB × I/O time per file. Current: running_check
-  consulted between each 2 MB sample — abort within 1 sample
-  (~milliseconds on local disk, bounded on network).
+ FIXED. Previously: for photos
+ >6 MB (sampled path: 2MB head + 2MB middle + 2MB tail),
+ running_check was only consulted in the full-hash branch.
+ Cancelling a dup-scan on a slow network drive would wait
+ up to 6 MB × I/O time per file. Current: running_check
+ consulted between each 2 MB sample — abort within 1 sample
+ (~milliseconds on local disk, bounded on network).
 
 G37. clear_cache / _AutoCleanWorker wiped ANY *.jpg in cache_dir
-  FIXED (P0 data-loss). Same class as /trash
-  prefix, but for cache. Previously: cache_dir validated only
-  for empty/dot/non-absolute/root; a user mis-pointing cache
-  at a photo folder + clicking "Clear cache now" deleted every
-  JPG there -- irreversibly (cache files do NOT go to trash).
-  _AutoCleanWorker did the same automatically on app start
-  (2s after launch) for files older than auto_clean_days.
-  Current: both paths match only cache filenames
-  ^(q_)?[0-9a-f]{40}[.]jpg$ (ThumbnailLoader shapes); foreign
-  *.jpg left untouched. change_cache_path also warns if chosen
-  folder contains foreign *.jpg ("this folder contains N .jpg
-  not created by Memory Calendar -- continue?"). Default No.
-  follow-up: _invalidate_quad_cache_async (called from
-  on_file_rotated_viewer) was a THIRD call site with the
-  broad q_*.jpg glob -- not covered by . If cache_dir was
-  mis-pointed at a photo folder, rotating any image deleted
-  user files named q_*.jpg (unrecoverable, not into trash).
-  Now uses the same strict ^q_[0-9a-f]{40}[.]jpg$ pattern
-  plus full cache_dir validation (empty/absolute/root/
-  resolve/is_dir). See I46.
+ FIXED (P0 data-loss). Same class as /trash
+ prefix, but for cache. Previously: cache_dir validated only
+ for empty/dot/non-absolute/root; a user mis-pointing cache
+ at a photo folder + clicking "Clear cache now" deleted every
+ JPG there -- irreversibly (cache files do NOT go to trash).
+ _AutoCleanWorker did the same automatically on app start
+ (2s after launch) for files older than auto_clean_days.
+ Current: both paths match only cache filenames
+ ^(q_)?[0-9a-f]{40}[.]jpg$ (ThumbnailLoader shapes); foreign
+ *.jpg left untouched. change_cache_path also warns if chosen
+ folder contains foreign *.jpg ("this folder contains N.jpg
+ not created by Memory Calendar -- continue?"). Default No.
+ follow-up: _invalidate_quad_cache_async (called from
+ on_file_rotated_viewer) was a THIRD call site with the
+ broad q_*.jpg glob -- not covered by. If cache_dir was
+ mis-pointed at a photo folder, rotating any image deleted
+ user files named q_*.jpg (unrecoverable, not into trash).
+ Now uses the same strict ^q_[0-9a-f]{40}[.]jpg$ pattern
+ plus full cache_dir validation (empty/absolute/root/
+ resolve/is_dir). See I46.
 
 G38. paste_files move + exception deleted the only copy of file
-  FIXED (P0 data-loss). Previously: except handler did
-  `if not _dest_existed_before and exists(dest): os.remove(dest)`
-  for BOTH copy and move. For "move": shutil.move(fp, dest)
-  succeeded (fp gone), then _purge_path_everywhere(fp) or a
-  category append raised, then except deleted dest -- the only
-  copy, no trash entry, no undo record. File irrecoverably lost.
-  Trigger window: corrupted self.categories (bad type from
-  partial restore, or MemoryError during list append on huge
-  categories). Narrow but real.
-  Current: moved.append((fp, dest)) runs BEFORE
-  _purge_path_everywhere; except cleanup ONLY for copy action.
-  For move: dest left in place, calendar entry preserved.
+ FIXED (P0 data-loss). Previously: except handler did
+ `if not _dest_existed_before and exists(dest): os.remove(dest)`
+ for BOTH copy and move. For "move": shutil.move(fp, dest)
+ succeeded (fp gone), then _purge_path_everywhere(fp) or a
+ category append raised, then except deleted dest -- the only
+ copy, no trash entry, no undo record. File irrecoverably lost.
+ Trigger window: corrupted self.categories (bad type from
+ partial restore, or MemoryError during list append on huge
+ categories). Narrow but real.
+ Current: moved.append((fp, dest)) runs BEFORE
+ _purge_path_everywhere; except cleanup ONLY for copy action.
+ For move: dest left in place, calendar entry preserved.
 
 G39. root-guard bypass via `..` and symlinks
-  FIXED (P1). Previously root guard used
-  `Path(x).parent == Path(x)` -- true only for actual root
-  strings. `Path("C:/foo/..")` has parent "C:/foo" (not self),
-  but resolves to `C:/`. Same for symlink-to-root. Corrupted
-  config with cache_dir="C:/foo/../.." passed guard.
-  Current: .resolve before parent==self check in
-  load_config / on_cache_settings_changed / clear_cache /
-  _AutoCleanWorker / get_cache_path / set_trash_dir. Any path
-  resolving to root is rejected.
+ FIXED (P1). Previously root guard used
+ `Path(x).parent == Path(x)` -- true only for actual root
+ strings. `Path("C:/foo/..")` has parent "C:/foo" (not self),
+ but resolves to `C:/`. Same for symlink-to-root. Corrupted
+ config with cache_dir="C:/foo/../.." passed guard.
+ Current:.resolve before parent==self check in
+ load_config / on_cache_settings_changed / clear_cache /
+ _AutoCleanWorker / get_cache_path / set_trash_dir. Any path
+ resolving to root is rejected.
 
 G40. load_config: `"cache": null` wipes ALL user settings
-  FIXED (P1). Previously: `self.config.update(data.get(
-  "cache", {}))` -- .get returns None for explicit null, and
-  update(None) raises TypeError. Outer except caught it, but
-  the entire sanitize block had already run? No -- the
-  exception was raised on the FIRST line of try, before any
-  sanitize; self.config stayed at __init__ defaults. Next
-  save_config (on close / on any setting change) OVERWROTE
-  config.json with defaults: cache_dir, trash_dir, retention
-  365 -> 7 (old trash files could purge), theme, undo_limit,
-  safe_* -- all user prefs lost. Files on disk intact; only
-  prefs lost, but very confusing.
-  Current: _cache_cfg = data.get("cache", {});
-  if not isinstance(_cache_cfg, dict): _cache_cfg = {}.
-  Self.config.update(_cache_cfg) always sees a dict.
+ FIXED (P1). Previously: `self.config.update(data.get(
+ "cache", {}))` --.get returns None for explicit null, and
+ update(None) raises TypeError. Outer except caught it, but
+ the entire sanitize block had already run? No -- the
+ exception was raised on the FIRST line of try, before any
+ sanitize; self.config stayed at __init__ defaults. Next
+ save_config (on close / on any setting change) OVERWROTE
+ config.json with defaults: cache_dir, trash_dir, retention
+ 365 -> 7 (old trash files could purge), theme, undo_limit,
+ safe_* -- all user prefs lost. Files on disk intact; only
+ prefs lost, but very confusing.
+ Current: _cache_cfg = data.get("cache", {});
+ if not isinstance(_cache_cfg, dict): _cache_cfg = {}.
+ Self.config.update(_cache_cfg) always sees a dict.
 
 ================================================================================
-  H. KNOWN LOG NOISE (not errors)
+ H. KNOWN LOG NOISE (not errors)
 ================================================================================
 
 H1. "Video semaphore busy, skipping: <path>" — 4 concurrent previews
-  active; new request skipped. Preview loads on next scroll.
+ active; new request skipped. Preview loads on next scroll.
 
 H2. "Video frame extraction timed out after 5.0s" — file couldn't be
-  opened; no thumbnail for that file.
+ opened; no thumbnail for that file.
 
 H3. "Thumbnail error: <...>" — corrupt image / permission denied /
-  unsupported subformat. Thumbnail skipped; file stays.
+ unsupported subformat. Thumbnail skipped; file stays.
 
 H4. "redo: N move conflict(s) skipped" — redo of a move hit occupied
-  destination; source stays on disk, not in calendar. Expected.
+ destination; source stays on disk, not in calendar. Expected.
 
 H5. "backup failed: <...>" then save proceeds anyway. Warned in status
-  bar. Disk-space / permissions issue.
+ bar. Disk-space / permissions issue.
 
 H6. "redo: refusing to replay paste-with-overwrite" — explicit skip.
-  See B2.
+ See B2.
 
 H7. "drag move: busy, deferring 500ms" — explicit defer. See C5.
 
 H9. "qt.gui.imageio.jpeg: Corrupt JPEG data: N extraneous bytes"
-  in terminal (or stderr) when viewing/thumbnail-loading certain
-  JPG files.
-  Cause:  Qt's built-in JPEG decoder (not our code) reports
-  these warnings when a JPEG has extraneous bytes
-  after the EOI marker (0xd9). Common for photos from
-  some cameras/editors. The image itself decodes fine.
-  Qt logs to stderr at INFO level; message format is
-  "qt.gui.imageio.jpeg: Corrupt JPEG data: ...".
-  Impact:  Cosmetic. Image renders correctly. If QImageReader
-  fails entirely (rare), our PIL fallback in
-  ImageViewer.update_view handles the file.
-  Not a bug. Cosmetic Qt-side log noise.
+ in terminal (or stderr) when viewing/thumbnail-loading certain
+ JPG files.
+ Cause: Qt's built-in JPEG decoder (not our code) reports
+ these warnings when a JPEG has extraneous bytes
+ after the EOI marker (0xd9). Common for photos from
+ some cameras/editors. The image itself decodes fine.
+ Qt logs to stderr at INFO level; message format is
+ "qt.gui.imageio.jpeg: Corrupt JPEG data:...".
+ Impact: Cosmetic. Image renders correctly. If QImageReader
+ fails entirely (rare), our PIL fallback in
+ ImageViewer.update_view handles the file.
+ Not a bug. Cosmetic Qt-side log noise.
 
 H8. "--- Logging error ---" + OSError [WinError 1] in terminal while
-  scrolling a video gallery (dev-mode only).
-  Scenario: 4 concurrent video-frame workers. Each enters
-  with suppress_stderr (refcounted). While ANY
-  worker is inside the suppression window, fd 2 = devnull.
-  If another worker / parent thread calls logger.info
-  during that window, StreamHandler writes to a devnull-
-  backed fd, which on Windows raises ERROR_INVALID_FUNCTION
-  inside logging.emit.
-  Impact:  File log (app.log) works; every line lands there. Only
-  the terminal StreamHandler emits the "--- Logging error ---"
-  traceback. PyInstaller --noconsole build has
-  sys.stderr=None → StreamHandler not created → error
-  absent entirely.
-  Why:  refcounting was correct for the suppression itself;
-  the noise is a side-effect of having BOTH suppressed
-  and un-suppressed writers to the same fd. Full fix
-  would require per-thread stderr redirection (OS-level
-  per-thread handles, not portable on Windows) or moving
-  StreamHandler off fd 2 — large redesign, zero user
-  impact.
-  Not a bug. Cosmetic dev-mode noise. See G2, H1, H2.
+ scrolling a video gallery (dev-mode only).
+ Scenario: 4 concurrent video-frame workers. Each enters
+ with suppress_stderr (refcounted). While ANY
+ worker is inside the suppression window, fd 2 = devnull.
+ If another worker / parent thread calls logger.info
+ during that window, StreamHandler writes to a devnull-
+ backed fd, which on Windows raises ERROR_INVALID_FUNCTION
+ inside logging.emit.
+ Impact: File log (app.log) works; every line lands there. Only
+ the terminal StreamHandler emits the "--- Logging error ---"
+ traceback. PyInstaller --noconsole build has
+ sys.stderr=None → StreamHandler not created → error
+ absent entirely.
+ Why: refcounting was correct for the suppression itself;
+ the noise is a side-effect of having BOTH suppressed
+ and un-suppressed writers to the same fd. Full fix
+ would require per-thread stderr redirection (OS-level
+ per-thread handles, not portable on Windows) or moving
+ StreamHandler off fd 2 — large redesign, zero user
+ impact.
+ Not a bug. Cosmetic dev-mode noise. See G2, H1, H2.
 
 ================================================================================
-  I. THINGS THAT ARE *NOT* BUGS DESPITE APPEARING SO
+ I. THINGS THAT ARE *NOT* BUGS DESPITE APPEARING SO
 ================================================================================
 
 I1. "import_folder does nothing when busy" — WRONG. Shows
-  "Another operation is in progress" in status bar (2s). .
+ "Another operation is in progress" in status bar (2s).
 
 I2. "Empty calendar + Duplicates combo stuck on Duplicates" — WRONG.
-  combo resets to Days immediately.
+ combo resets to Days immediately.
 
 I3. "Paste in Months/Years silently no-op" — WRONG. Status shows
-  "Paste is only available in Gallery view".
+ "Paste is only available in Gallery view".
 
 I4. "Ctrl+A in duplicates gallery sometimes stops working" — fixed via QShortcut strong reference.
 
 I5. "Ctrl+Z/Ctrl+Y stop working after clicking any button" — fixed via isinstance check (was hasattr(setText) matching QPushButton).
 
 I6. "HEIC corrupted by rotate" — WRONG. Refuses to rotate without
-  pillow-heif, file untouched.
+ pillow-heif, file untouched.
 
 I7. "Video sampled hash may collide on montage edits" — WRONG. Videos
-  use full hash since .
+ use full hash since.
 
-I8. "suppress_stderr permanently breaks stderr" — FIXED . Refcounted
-  suppression: first entrant saves real fd, last exiter restores.
-  Reproducible bug in (per-worker save/restore); resolved.
+I8. "suppress_stderr permanently breaks stderr" — FIXED. Refcounted
+ suppression: first entrant saves real fd, last exiter restores.
+ Reproducible bug in (per-worker save/restore); resolved.
 
-I9. "Trash cleanup wipes just-deleted old photos" — FIXED . Retention
-  now based on time file entered trash (parsed from ts prefix), not
-  source mtime. See D2.
+I9. "Trash cleanup wipes just-deleted old photos" — FIXED. Retention
+ now based on time file entered trash (parsed from ts prefix), not
+ source mtime. See D2.
 
 I10. "Redo silently desyncs calendar from disk after paste-overwrite" —
-  FIXED . Redo now skips with explicit status message. See B2.
+ FIXED. Redo now skips with explicit status message. See B2.
 
 I11. "closeEvent loses scan_finished results during confirm dialog" —
-  FIXED . Final _do_save_json(force=True) after all threads stop.
+ FIXED. Final _do_save_json(force=True) after all threads stop.
 
 I12. "on_duplicates_found writes dups to wrong calendar after source
-  deleted" — FIXED . Results discarded when source calendar missing.
+ deleted" — FIXED. Results discarded when source calendar missing.
 
-I13. "restore_from_backup installs non-list priority" — FIXED (NB-03).
-  Previously: load_last_session validated `priority` type; restore path
-  did not. A backup with "priority": "exif" or null restored silently,
-  then next scan returned 0 files (get_file_date iterated string
-  characters; no branch matched). User saw "Done. Files: 0" and thought
-  their library vanished (files on disk intact, but non-obvious).
-  Current behaviour:
-  _p = data.get("priority", DEFAULT_PRIORITY)
-  self.priority = _p if isinstance(_p, list) else list(DEFAULT_PRIORITY)
+I13. "restore_from_backup installs non-list priority" — FIXED.
+ Previously: load_last_session validated `priority` type; restore path
+ did not. A backup with "priority": "exif" or null restored silently,
+ then next scan returned 0 files (get_file_date iterated string
+ characters; no branch matched). User saw "Done. Files: 0" and thought
+ their library vanished (files on disk intact, but non-obvious).
+ Current behaviour:
+ _p = data.get("priority", DEFAULT_PRIORITY)
+ self.priority = _p if isinstance(_p, list) else list(DEFAULT_PRIORITY)
 
 I50. ImageViewer.delete_current bypassed scan protection (F17-symmetry)
-  FIXED in v1.0. Previously: btn_delete and the viewer context menu
-  call ImageViewer.delete_current() directly, NOT via MainWindow.
-  _on_delete_action. That entry point already had _guard_scan(), but
-  the two button/menu entries bypassed it — during 'safe media add'
-  scan the user could delete a file from the viewer, violating the
-  F17 invariant. Files went to trash (undoable) — not data-loss,
-  but a documented-contract violation.
-  Current: delete_current mirrors rotate_image — window()._guard_
-  scan() check at the top; no-op with 'Please wait — scan in
-  progress' status.
-  NB-12 (full @_busy_guard on delete_current) still open.
+ FIXED in v1.0. Previously: btn_delete and the viewer context menu
+ call ImageViewer.delete_current() directly, NOT via MainWindow.
+ _on_delete_action. That entry point already had _guard_scan(), but
+ the two button/menu entries bypassed it — during 'safe media add'
+ scan the user could delete a file from the viewer, violating the
+ F17 invariant. Files went to trash (undoable) — not data-loss,
+ but a documented-contract violation.
+ Current: delete_current mirrors rotate_image — window()._guard_
+ scan() check at the top; no-op with 'Please wait — scan in
+ progress' status.
+ (full @_busy_guard on delete_current) still open.
 
 I51. create_calendar was not guarded during scan
-  FIXED in v1.0 (was NB-55, P3). Previously: the only calendar-CRUD
-  method without _guard_scan(). Siblings rename_calendar /
-  clear_calendar / delete_calendar all guarded. During a scan:
-  current_cal_name could change, but ScannerThread writes to the
-  captured _scan_cal_name → after merge the user saw the new
-  (empty) calendar while the files landed in the old one. UX-only
-  — no data-loss.
-  Current: if self._guard_scan(): return at method start.
+ FIXED in v1.0 (P3). Previously: the only calendar-CRUD
+ method without _guard_scan(). Siblings rename_calendar /
+ clear_calendar / delete_calendar all guarded. During a scan:
+ current_cal_name could change, but ScannerThread writes to the
+ captured _scan_cal_name → after merge the user saw the new
+ (empty) calendar while the files landed in the old one. UX-only
+ — no data-loss.
+ Current: if self._guard_scan(): return at method start.
 
 I52. delete_selected_files dup-mode did not sync last_dups
-  FIXED in v1.0 (was NB-59, P2). Previously: on_gallery_delete_
-  dups set self.last_dups = remaining explicitly, but delete_
-  selected_files did not — open_duplicates_gallery filtered by
-  os.path.exists against the STALE last_dups. Only visible in
-  the narrow scenario where a file was deleted and then another
-  file appeared at the same path between delete and refresh →
-  phantom duplicate group. State desync with on_gallery_delete_
-  dups.
-  Current: self.last_dups = remaining or None before open_
-  duplicates_gallery (None, not {}, when empty — change_view_
-  mode(4) relies on `is not None` to know a scan already ran).
+ FIXED in v1.0, P2). Previously: on_gallery_delete_
+ dups set self.last_dups = remaining explicitly, but delete_
+ selected_files did not — open_duplicates_gallery filtered by
+ os.path.exists against the STALE last_dups. Only visible in
+ the narrow scenario where a file was deleted and then another
+ file appeared at the same path between delete and refresh →
+ phantom duplicate group. State desync with on_gallery_delete_
+ dups.
+ Current: self.last_dups = remaining or None before open_
+ duplicates_gallery (None, not {}, when empty — change_view_
+ mode(4) relies on `is not None` to know a scan already ran).
 
 I53. DuplicateScanThread progress uses two different bases
-  FIXED in v1.0 (was NB-09, P2). Previously: sizing phase emitted
-  (i, total_files), hashing phase emitted (done, total_hash).
-  update_progress only reset range when maximum==0, so the bar
-  appeared stalled during phase transition.
-  Current: DuplicateScanThread emits a monotonic base
-  (total + done, total + total_hash); update_progress accepts
-  a rising maximum.
+ FIXED in v1.0, P2). Previously: sizing phase emitted
+ (i, total_files), hashing phase emitted (done, total_hash).
+ update_progress only reset range when maximum==0, so the bar
+ appeared stalled during phase transition.
+ Current: DuplicateScanThread emits a monotonic base
+ (total + done, total + total_hash); update_progress accepts
+ a rising maximum.
 
 I54. ImageViewer.delete_current not under _busy_guard
-  FIXED in v1.0 (was NB-12, P2). Previously: QMessageBox.question
-  spins a nested event loop; _watch_cut_files (1.5s timer) could
-  fire inside it, mutate image_viewer.files, and cause
-  self.files.pop(current_index) to remove the wrong entry.
-  Current: MainWindow._busy is held across the entire confirm+move
-  window (try/finally). Ctrl+Z during the modal is blocked —
-  documented trade-off.
+ FIXED in v1.0, P2). Previously: QMessageBox.question
+ spins a nested event loop; _watch_cut_files (1.5s timer) could
+ fire inside it, mutate image_viewer.files, and cause
+ self.files.pop(current_index) to remove the wrong entry.
+ Current: MainWindow._busy is held across the entire confirm+move
+ window (try/finally). Ctrl+Z during the modal is blocked —
+ documented trade-off.
 
 I55. _rebuild_translatable_widgets fallback orphans position
-  FIXED in v1.0 (was NB-27, P2). Previously: if settings_view or
-  manager_view was already detached (idx == -1), the new widget
-  was inserted at stack.count (end), breaking hardcoded indices
-  0..5 in switch_tab / retranslate_ui / change_view_mode.
-  Current: settings_view inserted BEFORE help_view; manager_view
-  inserted BEFORE settings_view. Canonical order restored.
+ FIXED in v1.0, P2). Previously: if settings_view or
+ manager_view was already detached (idx == -1), the new widget
+ was inserted at stack.count (end), breaking hardcoded indices
+ 0..5 in switch_tab / retranslate_ui / change_view_mode.
+ Current: settings_view inserted BEFORE help_view; manager_view
+ inserted BEFORE settings_view. Canonical order restored.
 
 I56. HEIC rotate: no `quality` parameter — silent recompression
-  FIXED in v1.0 (was NB-45, P2). Previously: save_kwargs={} for
-  HEIF, so pillow-heif used its default (low) HEVC quality,
-  causing visible degradation on rotate.
-  Current: quality=95 passed to pillow-heif >= 0.11; older
-  versions ignore the kwarg harmlessly. No corruption, but
-  quality is preserved.
+ FIXED in v1.0, P2). Previously: save_kwargs={} for
+ HEIF, so pillow-heif used its default (low) HEVC quality,
+ causing visible degradation on rotate.
+ Current: quality=95 passed to pillow-heif >= 0.11; older
+ versions ignore the kwarg harmlessly. No corruption, but
+ quality is preserved.
 
 I57. paste_files: exception after move -> phantom calendar
-  FIXED in v1.0 (was NB-52, P2). Previously: if shutil.move(fp,
-  dest) succeeded but _purge_path_everywhere or cal_data append
-  raised, calendar kept fp (phantom) while the file lived at dest
-  (orphan). Current: except-handler for move (best-effort) purges
-  fp, adds dest with today's date. Calendar matches disk.
+ FIXED in v1.0, P2). Previously: if shutil.move(fp,
+ dest) succeeded but _purge_path_everywhere or cal_data append
+ raised, calendar kept fp (phantom) while the file lived at dest
+ (orphan). Current: except-handler for move (best-effort) purges
+ fp, adds dest with today's date. Calendar matches disk.
 
 I58. _watch_cut_files in viewer leaves stale image_viewer.files
-  FIXED in v1.0 (was NB-58, P2). Previously: external move of
-  non-current cut files purged them from calendar but left them
-  in image_viewer.files; next/prev gave "Could not load".
-  Current: _watch_cut_files (stack==5) filters image_viewer.files
-  by confirmed_missing, re-indexes current file, exits viewer if
-  the list becomes empty.
+ FIXED in v1.0, P2). Previously: external move of
+ non-current cut files purged them from calendar but left them
+ in image_viewer.files; next/prev gave "Could not load".
+ Current: _watch_cut_files (stack==5) filters image_viewer.files
+ by confirmed_missing, re-indexes current file, exits viewer if
+ the list becomes empty.
 
 I59. HEIC thumbnails were blank / "..." on some files
-  FIXED in v1.0. Previously: ThumbnailLoader and
-  generate_quad_thumbnail did ImageOps.fit(img, ..., LANCZOS)
-  BEFORE .convert("RGB"). pillow-heif sometimes returns non-8-bit
-  modes (10-bit, CMYK) on which LANCZOS crashes; error was
-  swallowed at logger.debug level, thumbnail stayed blank.
-  Current: .convert("RGB") is applied BEFORE ImageOps.fit in both
-  paths, and thumbnail errors log at WARNING level so future
-  failures are visible in app.log.
+ FIXED in v1.0. Previously: ThumbnailLoader and
+ generate_quad_thumbnail did ImageOps.fit(img,..., LANCZOS)
+ BEFORE.convert("RGB"). pillow-heif sometimes returns non-8-bit
+ modes (10-bit, CMYK) on which LANCZOS crashes; error was
+ swallowed at logger.debug level, thumbnail stayed blank.
+ Current:.convert("RGB") is applied BEFORE ImageOps.fit in both
+ paths, and thumbnail errors log at WARNING level so future
+ failures are visible in app.log.
 
 I60. Mass P3/P4 sweep
-  FIXED in v1.0. Added retry caps (NB-18), async cache clear (NB-20),
-  empty date preservation (NB-42), drop worker ref (NB-43), lang name
-  str (NB-44), clipboard disconnect (NB-56), non-dict saved JSON
-  guard (NB-57), dup thumb retry (NB-60), cache size pattern (NB-61).
+ FIXED in v1.0. Added retry caps, async cache clear,
+ empty date preservation, drop worker ref, lang name
+ str, clipboard disconnect, non-dict saved JSON
+ guard, dup thumb retry, cache size pattern.
 
-I65. Post-9-review polish sweep — NB-94..118 (18 items)
-  FIXED in v1.0. All P2/P3 polish items closed:
-  - NB-94 _backup_calendar_data atomic (tempfile + os.replace).
-    Previously copy2 left partial file on disk-full; not data-loss
-    (original intact) but consumed a BACKUP_KEEP slot.
-  - NB-96 update_progress busy-guard: dup-scan emissions no longer
-    clobber the progress bar owned by an active delete/paste.
-  - NB-97 delete/rotate in viewer: clears the affected dup group
-    from self.duplicates[cal] so survivors lose stale ⚠️ marker.
-  - NB-98 _watch_cut_files rebuild in try/except — state already
-    purged+saved; UI rebuild failure logged instead of crashing
-    the Qt slot.
-  - NB-101 export_calendar on empty calendar: shows msg_info
-    instead of silent no-op with "Ready" flash.
-  - NB-102 custom folder format without Y/M/D tokens: rejected
-    with diagnostic. Previously "ABC" compiled to a literal
-    regex that never matched; user got 0 files.
-  - NB-104 _LocalizedMessageBox.about: localized OK button.
-  - NB-105 _LocalizedMessageBox.question X-close: prefers any
-    RejectRole button over blind BT.No.
-  - NB-106 _purge_path_everywhere uses comprehension (removes
-    all occurrences, not just first). Matches _purge_paths_bulk.
-  - NB-107 CalendarView.draw_events: shows empty state when no
-    cards render (was silently empty, inconsistent with Days).
-  - NB-109 _count_files_in_state_split / _count_files_in_json_split:
-    log exception (was silent -1). Distinguishes "no data" from
-    MemoryError / corruption.
-  - NB-110 backup threshold requires old_count >= 20; 5->4
-    (20% drop = 1 file) no longer fires backup and consumes slots.
-  - NB-112 ThumbnailLoader: cache_dir validated on quad path.
-    Previously only single-file path went through get_cache_path
-    (root/CWD guards); quad wrote cache_path directly.
-  - NB-113 get_cache_size_mb uses strict _CACHE_FILENAME_RE
-    (was counting any *.jpg; misleading when cache pointed at a
-    photo folder).
-  - NB-114 QEventLoop imported at module top (was per-call).
-  - NB-115 cache-filename regexes as module constants
-    _CACHE_FILENAME_RE / _QUAD_CACHE_FILENAME_RE.
-  - NB-116 removed dead date_re from _sanitize_calendars (G8).
-  - NB-118 forward-delete resolves Backspace/Delete from
-    _resolved_hotkey(config, "delete") instead of platform.system();
-    respects user-rebound delete key on any platform.
+I65. Post-9-review polish sweep (18 items)
+ FIXED in v1.0. All P2/P3 polish items closed:
+ - _backup_calendar_data atomic (tempfile + os.replace).
+ Previously copy2 left partial file on disk-full; not data-loss
+ (original intact) but consumed a BACKUP_KEEP slot.
+ - update_progress busy-guard: dup-scan emissions no longer
+ clobber the progress bar owned by an active delete/paste.
+ - delete/rotate in viewer: clears the affected dup group
+ from self.duplicates[cal] so survivors lose stale ⚠️ marker.
+ - _watch_cut_files rebuild in try/except — state already
+ purged+saved; UI rebuild failure logged instead of crashing
+ the Qt slot.
+ - export_calendar on empty calendar: shows msg_info
+ instead of silent no-op with "Ready" flash.
+ - custom folder format without Y/M/D tokens: rejected
+ with diagnostic. Previously "ABC" compiled to a literal
+ regex that never matched; user got 0 files.
+ - _LocalizedMessageBox.about: localized OK button.
+ - _LocalizedMessageBox.question X-close: prefers any
+ RejectRole button over blind BT.No.
+ - _purge_path_everywhere uses comprehension (removes
+ all occurrences, not just first). Matches _purge_paths_bulk.
+ - CalendarView.draw_events: shows empty state when no
+ cards render (was silently empty, inconsistent with Days).
+ - _count_files_in_state_split / _count_files_in_json_split:
+ log exception (was silent -1). Distinguishes "no data" from
+ MemoryError / corruption.
+ - backup threshold requires old_count >= 20; 5->4
+ (20% drop = 1 file) no longer fires backup and consumes slots.
+ - ThumbnailLoader: cache_dir validated on quad path.
+ Previously only single-file path went through get_cache_path
+ (root/CWD guards); quad wrote cache_path directly.
+ - get_cache_size_mb uses strict _CACHE_FILENAME_RE
+ (was counting any *.jpg; misleading when cache pointed at a
+ photo folder).
+ - QEventLoop imported at module top (was per-call).
+ - cache-filename regexes as module constants
+ _CACHE_FILENAME_RE / _QUAD_CACHE_FILENAME_RE.
+ - removed dead date_re from _sanitize_calendars (G8).
+ - forward-delete resolves Backspace/Delete from
+ _resolved_hotkey(config, "delete") instead of platform.system();
+ respects user-rebound delete key on any platform.
 
-I64. v1.0 blocker sweep — NB-85..93 (post-9-review audit)
-  FIXED in v1.0.
-  - NB-85 rotate_image multi-frame TIFF/HEIC: previously saved only
-    first frame via temp+replace, irrecoverably destroying remaining
-    pages (real data-loss). Now refuses with RuntimeError when
-    img.n_frames > 1. MessageBox shows the reason; file untouched.
-  - NB-86 Windows: os.replace failed on read-only target files
-    (PermissionError). Rotate was silently broken for read-only
-    library files. Now chmod target writable during replace, restore
-    original mode in finally.
-  - NB-87 closeEvent: final _do_save_json(force=True) failure was
-    logged + msg_error but window still closed — any changes
-    accumulated after the first save were lost. Now event.ignore()
-    and return; user can fix disk/permissions and retry.
-  - NB-88 restore_from_backup: change_view_mode(4) ran inside
-    @_busy_guard → saw _busy=True, rolled back combo without
-    switching stack. Stale dup cards from pre-restore state stayed
-    visible. Now QTimer.singleShot(0, ...) defers mode application
-    past _busy_guard.
-  - NB-89 load_last_session: blockSignals(True) without try/finally
-    left the priority list permanently signal-blocked if any
-    _add_priority_item call raised (drag-n-drop silently no-ops).
-    Now try/finally restores blockSignals(False) unconditionally.
-  - NB-90 paste_files move fixup: except-handler purged valid src
-    from calendar and installed possibly-corrupt dest when
-    shutil.move failed mid-cross-FS-copy (dest created, src still
-    present). Now requires not os.path.exists(fp) before fixup.
-  - NB-91 _sync_duplicates_from_last_dups: when last_dups was None
-    (fresh session, duplicates loaded from JSON), first cut-paste
-    in Explorer wiped self.duplicates[cal]. Now early-return when
-    last_dups is None. Note: last_dups == {} still resets (valid
-    "zero dups" signal).
-  - NB-92 on_cal_changed: unguarded mid-scan calendar switch — same
-    class as NB-55. current_cal_name changed while ScannerThread
-    wrote to captured _scan_cal_name. Now _guard_scan() with combo
-    rollback to current_cal_name.
-  - NB-93 _do_save_json corrupt-JSON branch: backup failure only
-    logged, no NB-36 dialog. Corrupt-but-possibly-recoverable old
-    JSON could be overwritten silently. Now same backup-fail
-    confirmation as for normal backup path.
+I64. v1.0 blocker sweep (post-9-review audit)
+ FIXED in v1.0.
+ - rotate_image multi-frame TIFF/HEIC: previously saved only
+ first frame via temp+replace, irrecoverably destroying remaining
+ pages (real data-loss). Now refuses with RuntimeError when
+ img.n_frames > 1. MessageBox shows the reason; file untouched.
+ - Windows: os.replace failed on read-only target files
+ (PermissionError). Rotate was silently broken for read-only
+ library files. Now chmod target writable during replace, restore
+ original mode in finally.
+ - closeEvent: final _do_save_json(force=True) failure was
+ logged + msg_error but window still closed — any changes
+ accumulated after the first save were lost. Now event.ignore()
+ and return; user can fix disk/permissions and retry.
+ - restore_from_backup: change_view_mode(4) ran inside
+ @_busy_guard → saw _busy=True, rolled back combo without
+ switching stack. Stale dup cards from pre-restore state stayed
+ visible. Now QTimer.singleShot(0,...) defers mode application
+ past _busy_guard.
+ - load_last_session: blockSignals(True) without try/finally
+ left the priority list permanently signal-blocked if any
+ _add_priority_item call raised (drag-n-drop silently no-ops).
+ Now try/finally restores blockSignals(False) unconditionally.
+ - paste_files move fixup: except-handler purged valid src
+ from calendar and installed possibly-corrupt dest when
+ shutil.move failed mid-cross-FS-copy (dest created, src still
+ present). Now requires not os.path.exists(fp) before fixup.
+ - _sync_duplicates_from_last_dups: when last_dups was None
+ (fresh session, duplicates loaded from JSON), first cut-paste
+ in Explorer wiped self.duplicates[cal]. Now early-return when
+ last_dups is None. Note: last_dups == {} still resets (valid
+ "zero dups" signal).
+ - on_cal_changed: unguarded mid-scan calendar switch — same
+ class as NB-92. current_cal_name changed while ScannerThread
+ wrote to captured _scan_cal_name. Now _guard_scan() with combo
+ rollback to current_cal_name.
+ - _do_save_json corrupt-JSON branch: backup failure only
+ logged, no internal dialog. Corrupt-but-possibly-recoverable old
+ JSON could be overwritten silently. Now same backup-fail
+ confirmation as for normal backup path.
 
-I63. Undo-in-viewer left a stale gallery (NB-84)
-  FIXED in v1.0.
-  Scenario: delete file X in viewer -> Ctrl+Z while still in viewer
-  -> X restored on disk and in self.calendars, but exiting viewer
-  showed a gallery that still lacked X (until manual refresh or
-  reopen). Same symptom when X was deleted from the gallery, then
-  Ctrl+Z pressed from viewer.
-  Root cause: refresh_all_views() stack==5 branch cleared
-  _gallery_needs_rebuild because "fp is valid" — but all_files was
-  derived from gallery_view.raw_grouped_data (a stale snapshot),
-  not from self.calendars, so that test could not prove the
-  gallery was in sync.
-  Current: _gallery_needs_rebuild is forced True on entry to the
-  stack==5 branch AND is not cleared in the success path;
-  _on_viewer_back rebuilds the gallery from self.calendars (source
-  of truth) on exit. No data loss — the file was always on disk
-  after undo, only the gallery display was stale.
+I63. Undo-in-viewer left a stale gallery 
+ FIXED in v1.0.
+ Scenario: delete file X in viewer -> Ctrl+Z while still in viewer
+ -> X restored on disk and in self.calendars, but exiting viewer
+ showed a gallery that still lacked X (until manual refresh or
+ reopen). Same symptom when X was deleted from the gallery, then
+ Ctrl+Z pressed from viewer.
+ Root cause: refresh_all_views() stack==5 branch cleared
+ _gallery_needs_rebuild because "fp is valid" — but all_files was
+ derived from gallery_view.raw_grouped_data (a stale snapshot),
+ not from self.calendars, so that test could not prove the
+ gallery was in sync.
+ Current: _gallery_needs_rebuild is forced True on entry to the
+ stack==5 branch AND is not cleared in the success path;
+ _on_viewer_back rebuilds the gallery from self.calendars (source
+ of truth) on exit. No data loss — the file was always on disk
+ after undo, only the gallery display was stale.
 
 I62. v1.0 P3/P4 sweep — 4 lower-severity items
-  FIXED in v1.0.
-  - NB-80 _rebuild_translatable_widgets.disconnect() with no
-    arguments tore down ALL signal connections on the widget before
-    deleteLater(). Replaced with blockSignals(True) + deleteLater().
-    No behavioural change today (widgets are recreated); future-proofs
-    against internal connections added inside SettingsWidget /
-    CalendarManagerWidget.
-  - NB-81 _sanitize_calendars: set(_dup_v) on a list containing
-    unhashable items (possible after manual JSON edit) raised
-    TypeError outside any try/except. Now wrapped; falls back to
-    empty set with a warning. No data loss — surviving dup paths
-    are re-derived from the validated calendar entries.
-  - NB-82 _LocalizedMessageBox.question did not support Save /
-    Discard buttons (only Yes/No/Ok/Cancel). Any future caller using
-    Save|Discard|Cancel (standard "unsaved changes" dialog) would
-    have gotten a silent fallback OK button. Now handled; and the
-    resolution path is identity-first (Save and Ok share AcceptRole,
-    so role-only matching would mis-classify Save as Ok).
-  - NB-83 SettingsWidget._on_hk_changed: conflict detection scanned
-    ALL HOTKEY_ACTIONS regardless of shortcut context. Esc assigned
-    to close_viewer (widget-ctx) would falsely trigger a conflict
-    warning against any app-ctx action on Esc. Now filtered by ctx.
+ FIXED in v1.0.
+ - _rebuild_translatable_widgets.disconnect() with no
+ arguments tore down ALL signal connections on the widget before
+ deleteLater(). Replaced with blockSignals(True) + deleteLater().
+ No behavioural change today (widgets are recreated); future-proofs
+ against internal connections added inside SettingsWidget /
+ CalendarManagerWidget.
+ - _sanitize_calendars: set(_dup_v) on a list containing
+ unhashable items (possible after manual JSON edit) raised
+ TypeError outside any try/except. Now wrapped; falls back to
+ empty set with a warning. No data loss — surviving dup paths
+ are re-derived from the validated calendar entries.
+ - _LocalizedMessageBox.question did not support Save /
+ Discard buttons (only Yes/No/Ok/Cancel). Any future caller using
+ Save|Discard|Cancel (standard "unsaved changes" dialog) would
+ have gotten a silent fallback OK button. Now handled; and the
+ resolution path is identity-first (Save and Ok share AcceptRole,
+ so role-only matching would mis-classify Save as Ok).
+ - SettingsWidget._on_hk_changed: conflict detection scanned
+ ALL HOTKEY_ACTIONS regardless of shortcut context. Esc assigned
+ to close_viewer (widget-ctx) would falsely trigger a conflict
+ warning against any app-ctx action on Esc. Now filtered by ctx.
 
-I61. P2 sweep (was NB-22/24/25/66-79)
-  FIXED in v1.0. All P2 items closed in one patch cycle:
-  - NB-22 paste_files calendar flash — skip change_view_mode when
-    opening the gallery directly (open_gallery rebuilds the view).
-  - NB-24 viewer zoom/pan preserved on next/prev — ImageViewer keeps
-    _saved_transform between swaps; load_image resets it.
-  - NB-25 manager combo skips list_events rebuild when the event-key
-    set is unchanged.
-  - NB-66/67 _watch_cut_files viewer phantom — back out when files
-    list becomes empty; flag _gallery_needs_rebuild for stale tiles.
-  - NB-68 export_to_file strips modifier_key/delete_key from the
-    template so re-import on macOS/Linux does not overwrite them.
-  - NB-69 _build_menubar deleteLater()s old QActions; ambiguous
-    shortcuts after retranslate_ui no longer occur.
-  - NB-70 self.duplicates synced from last_dups after delete via
-    _sync_duplicates_from_last_dups() — stale ⚠️ marker fixed.
-  - NB-71 paste_files progress_bar.hide() after paste.
-  - NB-72 paste_files skips dead paths in clipboard on move error.
-  - NB-73 CSS font-family derived from FONT_FAMILY (was hardcoded
-    'Segoe UI' first — overrode FONT_FAMILY on macOS/Linux).
-  - NB-74 rotate_image deletes OLD cache file directly (mtime_ns
-    drift made on_file_rotated_viewer miss it).
-  - NB-75 restore_from_backup passes skip_backup_dialog=False so
-    the NB-36 dialog fires if the post-restore backup fails.
-  - NB-76 parse_folder_date dedups tokens by letter (Y/M/D) — a
-    format like "MM M" no longer crashes into re.error → None.
-  - NB-77 QFont.systemFont() + setPointSize(10) — works on PySide6
-    6.0-6.4 (QFont.systemFont(size) added in 6.5).
-  - NB-78 load_config bool sanitizer lowercases — "False"/"FALSE"/
-    "No"/"Off" correctly disable.
-  - NB-79 undo/redo/paste_files bypass _busy_guard when a text
-    widget has focus (new @_busy_guard_text_aware decorator).
+I61. P2 sweep (v1.0)
+ FIXED in v1.0. All P2 items closed in one patch cycle:
+ - paste_files calendar flash — skip change_view_mode when
+ opening the gallery directly (open_gallery rebuilds the view).
+ - viewer zoom/pan preserved on next/prev — ImageViewer keeps
+ _saved_transform between swaps; load_image resets it.
+ - manager combo skips list_events rebuild when the event-key
+ set is unchanged.
+ - _watch_cut_files viewer phantom — back out when files
+ list becomes empty; flag _gallery_needs_rebuild for stale tiles.
+ - export_to_file strips modifier_key/delete_key from the
+ template so re-import on macOS/Linux does not overwrite them.
+ - _build_menubar deleteLater()s old QActions; ambiguous
+ shortcuts after retranslate_ui no longer occur.
+ - self.duplicates synced from last_dups after delete via
+ _sync_duplicates_from_last_dups() — stale ⚠️ marker fixed.
+ - paste_files progress_bar.hide() after paste.
+ - paste_files skips dead paths in clipboard on move error.
+ - CSS font-family derived from FONT_FAMILY (was hardcoded
+ 'Segoe UI' first — overrode FONT_FAMILY on macOS/Linux).
+ - rotate_image deletes OLD cache file directly (mtime_ns
+ drift made on_file_rotated_viewer miss it).
+ - restore_from_backup passes skip_backup_dialog=False so
+ the internal dialog fires if the post-restore backup fails.
+ - parse_folder_date dedups tokens by letter (Y/M/D) — a
+ format like "MM M" no longer crashes into re.error → None.
+ - QFont.systemFont() + setPointSize(10) — works on PySide6
+ 6.0-6.4 (QFont.systemFont(size) added in 6.5).
+ - load_config bool sanitizer lowercases — "False"/"FALSE"/
+ "No"/"Off" correctly disable.
+ - undo/redo/paste_files bypass _busy_guard when a text
+ widget has focus (new @_busy_guard_text_aware decorator).
 
 I66. P1 fix — _invalidate_quad_cache_async NameError (_cache_re)
-  FIXED in v1.0.
-  - _invalidate_quad_cache_async used undefined `_cache_re` variable;
-    NameError swallowed by outer except; worker never started; quad
-    cache never invalidated after rotate. Combined with
-    rotate_image's os.utime(mtime) preservation, the quad-cache key
-    (filepath|mtime_ns) did not change -> stale quad thumbnails in
-    Days/Months/Years/Events/Duplicates until manual cache clear.
-  - Current: QThreadPool.globalInstance().start(
-    _Worker(cd, _QUAD_CACHE_FILENAME_RE)). The module-level
-    _QUAD_CACHE_FILENAME_RE (defined by NB-115) is now actually used,
-    matching clear_cache / _AutoCleanWorker patterns.
-  - Not data-loss; UI-state-desync only. See G37/I46 for the related
-    cache-prefix-guard history.
+ FIXED in v1.0.
+ - _invalidate_quad_cache_async used undefined `_cache_re` variable;
+ NameError swallowed by outer except; worker never started; quad
+ cache never invalidated after rotate. Combined with
+ rotate_image's os.utime(mtime) preservation, the quad-cache key
+ (filepath|mtime_ns) did not change -> stale quad thumbnails in
+ Days/Months/Years/Events/Duplicates until manual cache clear.
+ - Current: QThreadPool.globalInstance().start(
+ _Worker(cd, _QUAD_CACHE_FILENAME_RE)). The module-level
+ _QUAD_CACHE_FILENAME_RE (defined by NB-115) is now actually used,
+ matching clear_cache / _AutoCleanWorker patterns.
+ - Not data-loss; UI-state-desync only. See G37/I46 for the related
+ cache-prefix-guard history.
 
-I67. Post-12-review P2 batch — NB-133/134/135/139/140 (5 items)
-  FIXED in v1.0.
-  - NB-133 closeEvent final-save-fail: on `event.ignore()` after
-    `_do_save_json(force=True)` returns False, restore UI state
-    (btn_import enabled, hide cancel-scan + progress bar, resume
-    _cut_watch_timer if clipboard_action == "move"). NB-87 kept the
-    window open; without this, user could not import/retry cleanly.
-  - NB-134 move_to_trash: capture `_orig_mode` before chmod, apply it
-    to `trash_path` after shutil.move. Ctrl+Z restores the file with
-    its intended read-only mode on POSIX (was 0o644 instead of 0o444).
-  - NB-135 closeEvent: first `_do_save_json()` call now uses
-    `skip_backup_dialog=True`; only the final force=True save triggers
-    the NB-36 backup-fail dialog. Eliminates up-to-three-dialog spam
-    for the same backup failure.
-  - NB-139 SettingsWidget.change_cache_path: call
-    `self.update_cache_size({"cache_dir": folder})` immediately after
-    folder selection so "Used: N MB" label matches the new folder.
-  - NB-140 dropEvent: reject non-media single-file drops (no more
-    full-parent-folder scan for a stray .txt/.pdf). Multi-URL loop
-    picks the first usable entry; status message when nothing usable.
-  - NB-125/126/127/128/129/130/131/132/136/137/138. 
-    Each requires logic rework / hardware testing / co-change
-    with related fixes; per project policy, batched into next cycle.
-  - Not data-loss / corruption / crash. UI/UX polish only.
+I67. Post-12-review P2 batch (5 items)
+ FIXED in v1.0.
+ - closeEvent final-save-fail: on `event.ignore()` after
+ `_do_save_json(force=True)` returns False, restore UI state
+ (btn_import enabled, hide cancel-scan + progress bar, resume
+ _cut_watch_timer if clipboard_action == "move"). NB-87 kept the
+ window open; without this, user could not import/retry cleanly.
+ - move_to_trash: capture `_orig_mode` before chmod, apply it
+ to `trash_path` after shutil.move. Ctrl+Z restores the file with
+ its intended read-only mode on POSIX (was 0o644 instead of 0o444).
+ - closeEvent: first `_do_save_json()` call now uses
+ `skip_backup_dialog=True`; only the final force=True save triggers
+ the NB-36 backup-fail dialog. Eliminates up-to-three-dialog spam
+ for the same backup failure.
+ - SettingsWidget.change_cache_path: call
+ `self.update_cache_size({"cache_dir": folder})` immediately after
+ folder selection so "Used: N MB" label matches the new folder.
+ - dropEvent: reject non-media single-file drops (no more
+ full-parent-folder scan for a stray.txt/.pdf). Multi-URL loop
+ picks the first usable entry; status message when nothing usable.
+ - NB-125 (paste move+overwrite partial dest) remains open —
+ deferred for hardware testing. All others in the batch were
+ closed in v1.1 (see I68).
+ - Not data-loss / corruption / crash. UI/UX polish only.
+
+I68. v1.1 review round 2 — external audit fixes
+ FIXED in v1.1. External review surfaced several data-safety
+ and UX issues; all patched:
+ - closeEvent: no longer overwrites calendar_data.json without
+   backup confirmation when backup fails.
+ - export_event_media: collision-safe (auto-suffix); no silent
+   overwrite of existing files.
+ - faulthandler.enable() guarded for --noconsole builds.
+ - restore_from_trash: atomic write via tempfile + os.replace.
+ - scan_finished: parent-directory accessibility check —
+   disconnected drive during scan no longer purges calendar.
+ - find_missing_files: relink recheck for drive offline; resets
+   last_dups after relink.
+ - Events export/import signals reconnected after language change.
+ - force_resort: undo snapshot created before resort.
+ - load_config: bg_thumb_gen / ask_relink_on_startup sanitized
+   as bool.
+ - move_to_trash: file mode restored on failure.
+ - clean_trash: read-only files removed (Windows).
+ - Hotkey editor: PortableText instead of NativeText.
+ - NB-126 through NB-138 batch: dup-group partial removal,
+   remove_from_event respects current event, paste/remove_event
+   modal guards, sanitize path deduplication, scan identity
+   check, structured missing-files report, reserved menu
+   shortcuts.
+ - Cross-platform: Fusion only on Win/Linux, Linux font from
+   QFontDatabase, platform-aware icon.
+ - i18n: hardcoded UI strings moved to DEFAULT_LANGUAGE.
+ - Paste overwrite NB-95: restore original on copy failure.
+ - closeEvent drains calendar_view._bg_pool.
+
+I69. v1.1 final patch cycle — post-release audit fixes
+ FIXED in v1.1. Final round of external review fixes:
+ - paste_files move+overwrite partial dest: original restored,
+   partial dest removed, fp kept in clipboard (NB-125).
+ - scan_finished: discards results if target calendar was
+   deleted mid-scan (no fallback to a different calendar).
+ - find_missing_files relink: ambiguous basenames (multiple files
+   with same name in new folder) are now skipped instead of
+   arbitrarily linking to the last one found.
+ - ScannerThread: now skips custom user cache_dir and trash_dir
+   (NB-132).
+ - _sanitize_calendars: cross-date dedupe of paths (NB-131).
+ - force_resort: dedupes paths; cancelling now pops the
+   phantom undo snapshot; progress bar reaches 100%.
+ - remove_from_event: respects event context when invoked from
+   the Viewer (NB-127).
+ - Dup-marker sync: last_dups uses {} (not None) when empty, so
+   survivors lose stale ⚠️ markers immediately (NB-130).
+ - Language change: centered modal progress dialog during the
+   synchronous Settings/Manager rebuild.
+ - Video play overlay: applied consistently in both sync-cache
+   and async thumbnail paths.
+ - HEIC rotate: localized multi-frame refusal dialog,
+   pre-decode status message, and indeterminate progress bar
+   during encode. Reentrancy guard prevents duplicate dialogs
+   on double-click.
+ - File-menu shortcut leak fixed (QMenu objects deleted on
+   retranslate); reserved shortcuts filtered on load.
 
 ================================================================================
-  J. CROSS-PLATFORM (BETA)
+ J. CROSS-PLATFORM (BETA)
 ================================================================================
 
 J1. macOS and Linux are BETA
-  The application was built with cross-platform frameworks (PySide6, Pillow,
-  OpenCV), but the maintainer only has access to Windows for testing.
-  macOS and Linux builds contain platform-specific logic (e.g., Apple fonts,
-  dbus calls, Backspace mapping) but are not end-to-end tested.
-  Do not use these builds for irreplaceable data without a backup.
+ The application was built with cross-platform frameworks (PySide6, Pillow,
+ OpenCV), but the maintainer only has access to Windows for testing.
+ macOS and Linux builds contain platform-specific logic (e.g., Apple fonts,
+ dbus calls, Backspace mapping) but are not end-to-end tested.
+ Do not use these builds for irreplaceable data without a backup.
 
 J2. File creation date (PRIO_CTIME) is unavailable on Linux
-  Linux filesystems (ext4, btrfs) do not expose file creation time via
-  standard Python `os.stat` (st_birthtime is missing, st_ctime is metadata
-  change time). The app automatically hides PRIO_CTIME in Settings and
-  filters it out of the priority list on Linux to prevent 0-file scans.
+ Linux filesystems (ext4, btrfs) do not expose file creation time via
+ standard Python `os.stat` (st_birthtime is missing, st_ctime is metadata
+ change time). The app automatically hides PRIO_CTIME in Settings and
+ filters it out of the priority list on Linux to prevent 0-file scans.
 
 J3. "Show in folder" relies on dbus on Linux
-  We use `dbus-send` to ask the system file manager (Nautilus, Dolphin) to
-  highlight the selected file. If the dbus call fails (e.g., no desktop
-  portal, SSH session), it falls back to `xdg-open` which opens the parent
-  folder but does not highlight the file.
+ We use `dbus-send` to ask the system file manager (Nautilus, Dolphin) to
+ highlight the selected file. If the dbus call fails (e.g., no desktop
+ portal, SSH session), it falls back to `xdg-open` which opens the parent
+ folder but does not highlight the file.
 
 J4. Native font detection
-  On Windows, Segoe UI is used. On macOS, `.AppleSystemUIFont` is used.
-  On Linux, it falls back to the system default sans-serif (usually DejaVu
-  Sans or Noto Sans) defined by the OS Qt theme.
+ On Windows, Segoe UI is used. On macOS, `.AppleSystemUIFont` is used.
+ On Linux, it falls back to the system default sans-serif (usually DejaVu
+ Sans or Noto Sans) defined by the OS Qt theme.
 
 ================================================================================
-  K. HOTKEY EDITOR (+)
+ K. HOTKEY EDITOR (+)
 ================================================================================
 
 K1. Configuration uses PortableText
-  Hotkeys are saved in config.json as "Ctrl+E", "Shift+Alt+X", etc.
-  Never "Meta+" or "Cmd+". Qt translates "Ctrl" to the Command key
-  on macOS automatically (`QKeySequence.NativeText`).
+ Hotkeys are saved in config.json as "Ctrl+E", "Shift+Alt+X", etc.
+ Never "Meta+" or "Cmd+". Qt translates "Ctrl" to the Command key
+ on macOS automatically (`QKeySequence.NativeText`).
 
 K2. Conflict resolution
-  If you assign a shortcut that is already used by another action, a
-  dialog asks for confirmation. If you accept, BOTH actions will share
-  the shortcut. Qt will trigger them based on the currently focused widget
-  (or trigger both if both are global, which is not recommended).
+ If you assign a shortcut that is already used by another action, a
+ dialog asks for confirmation. If you accept, BOTH actions will share
+ the shortcut. Qt will trigger them based on the currently focused widget
+ (or trigger both if both are global, which is not recommended).
 
 K3. Empty field = Disabled
-  Clearing a QKeySequenceEdit field (or clicking the red ✕ button) sets
-  the key to an empty string. This explicitly disables the keyboard shortcut
-  for that action, though the menu item or button will still work.
+ Clearing a QKeySequenceEdit field (or clicking the red ✕ button) sets
+ the key to an empty string. This explicitly disables the keyboard shortcut
+ for that action, though the menu item or button will still work.
 
 K4. Profile vs. Explicit Overrides
-  Switching the "Platform profile" (Auto/Windows/macOS/Linux) changes the
-  defaults for actions you haven't explicitly overridden. If you manually
-  set "Undo" to "Ctrl+Alt+Z" on Windows, switching the profile to macOS
-  will NOT change your Undo override (it stays Ctrl+Alt+Z).
+ Switching the "Platform profile" (Auto/Windows/macOS/Linux) changes the
+ defaults for actions you haven't explicitly overridden. If you manually
+ set "Undo" to "Ctrl+Alt+Z" on Windows, switching the profile to macOS
+ will NOT change your Undo override (it stays Ctrl+Alt+Z).
 
 K5. macOS Backspace default
-  The default "Delete" shortcut on macOS is Backspace, not Del. This is
-  applied automatically when the macOS profile is selected. On Windows and
-  Linux, it remains Del.
+ The default "Delete" shortcut on macOS is Backspace, not Del. This is
+ applied automatically when the macOS profile is selected. On Windows and
+ Linux, it remains Del.
 

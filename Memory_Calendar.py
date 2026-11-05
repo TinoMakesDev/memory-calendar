@@ -4,6 +4,14 @@ import subprocess, time, copy, contextlib, stat, tempfile, threading, functools
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
+# [PATCH-1.1-FIX6-01]
+import faulthandler
+try:
+    if sys.stderr is not None:
+        faulthandler.enable()
+except Exception:
+    pass
+
 import cv2
 from PIL import Image, ImageOps
 
@@ -26,8 +34,10 @@ from PySide6.QtWidgets import (
     QDialog, QComboBox, QInputDialog, QFrame,
     QTabWidget, QCheckBox, QSpinBox, QLineEdit, QDialogButtonBox,
     QKeySequenceEdit,
+    # [PATCH-1.1-FIX7-01]
     QScrollArea, QGridLayout,
     QRubberBand,
+    QProgressDialog,
 )
 from PySide6.QtCore import (
     Qt, QThread, Signal, QMimeData, QUrl, QSize, QThreadPool, QRunnable, Slot,
@@ -133,7 +143,15 @@ def _get_data_dir() -> Path:
         elif system == "Darwin":
             base = home / "Library" / "Application Support"
         else:
-            base = Path(os.environ.get("XDG_DATA_HOME") or (home / ".local" / "share"))
+            _xdg = os.environ.get("XDG_DATA_HOME")
+            if _xdg:
+                try:
+                    _xp = Path(_xdg)
+                    if not _xp.is_absolute():
+                        _xdg = None
+                except Exception:
+                    _xdg = None
+            base = Path(_xdg) if _xdg else (home / ".local" / "share")
         d = base / "MemoryCalendar"
         d.mkdir(parents=True, exist_ok=True)
         return d
@@ -221,7 +239,8 @@ PRIO_FOLDER = "folder"
 PRIO_EXIF = "exif"
 PRIO_CTIME = "ctime"
 PRIO_MTIME = "mtime"
-DEFAULT_PRIORITY = [PRIO_FOLDER, PRIO_EXIF, PRIO_CTIME, PRIO_MTIME]
+# [PATCH-1.1-FIX2-01]
+DEFAULT_PRIORITY = [PRIO_FOLDER, PRIO_MTIME, PRIO_EXIF, PRIO_CTIME]
 _VALID_PRIO_ITEMS = frozenset((PRIO_FOLDER, PRIO_EXIF, PRIO_CTIME, PRIO_MTIME))
 
 
@@ -253,6 +272,9 @@ SKIP_DIRS = {"$recycle.bin", "system volume information", ".thumbnails",
 # (default_hotkey, resolved_hotkey) can compile and be imported
 # for without another refactor.
 BETA_PLATFORM = platform.system() in ("Darwin", "Linux")
+
+# [PATCH-1.1-FIX11-NB138] File-menu shortcuts not rebindable
+RESERVED_SHORTCUTS = {"Ctrl+O", "Ctrl+Q", "Ctrl+,"}
 
 HOTKEY_ACTIONS = {
     # app context - MainWindow, ApplicationShortcut
@@ -312,7 +334,18 @@ def _system_font_family():
         return "Segoe UI"
     if platform.system() == "Darwin":
         return ".AppleSystemUIFont"
-    return ""
+    # [PATCH-1.1-FIX11-NB111] Linux: real system font
+    try:
+        from PySide6.QtGui import QFontDatabase, QFont
+        _fam = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont).family()
+        if _fam:
+            return _fam
+    except Exception:
+        pass
+    try:
+        return QFont().family() or ""
+    except Exception:
+        return ""
 
 FONT_FAMILY = _system_font_family()  # per-platform system font
 
@@ -360,7 +393,9 @@ DEFAULT_LANGUAGE = {
     "btn_redo": "↷",
     "btn_cut": "✂ Cut",
     "btn_copy": "📋 Copy",
+    # [PATCH-1.1-07a]
     "btn_delete": "🗑 Delete",
+    "btn_export_media": "Export Media",
     "btn_delete_dups": "🗑 Delete duplicates",
     "btn_rotate_left": "↺ Left",
     "btn_rotate_right": "↻ Right",
@@ -447,7 +482,10 @@ DEFAULT_LANGUAGE = {
     "settings_title": "Settings",
     "settings_priority_desc": "Drag priorities up/down — the first source with a valid date wins.",
     "settings_add_format": "➕ Add custom folder format",
+    # [PATCH-1.1-FIX2-08a]
     "settings_remove_format": "🗑 Remove selected format",
+    # [PATCH-1.1-FIX3-A]
+"btn_force_resort": "🔄 Apply Priority and Resort",
     "settings_cache_box": "<b>Preview cache</b>",
     "settings_cache_path": "Path:",
     "settings_cache_change": "Change folder",
@@ -466,6 +504,22 @@ DEFAULT_LANGUAGE = {
     "settings_trash_retention": "Keep deleted files for",
     "settings_safe_media_add": "Safe media add: block UI above",
     "settings_safe_media_files": " media file(s)",
+    "settings_bg_previews": "Generate previews in background",
+    "settings_ask_relink": "When opening a calendar: check for missing files and offer to relink",
+    "settings_export_events": "Export events (JSON)",
+    "settings_import_events": "Import events (JSON)",
+    "btn_apply_priority": "Applying priority",
+    "btn_apply_priority_msg": "Please wait while files are re-sorted...",
+    "status_bg_previews": "Background previews: {done} / {total}",
+    "status_bg_complete": "Background preview generation complete.",
+    "status_bg_generated": "Background previews: {n} generated",
+    "status_counting_previews": "Counting previews...",
+    "status_export_media": "Exported {n} file(s).",
+    "status_import_events": "Imported {n} file(s) into events.",
+    "status_no_matching_files": "No matching files found in the selected folder.",
+    "info_import_events_none": "No new events to import.",
+    "title_missing_detected": "Missing files detected",
+    "confirm_missing_detected": "Some files in calendar '{name}' are missing.\n\nDo you want to find the folder with the missing files and relink, or remove them?",
     "dialog_scanning_title": "Adding media files",
     "dialog_scanning_body": "Please wait while media files are being added to the calendar…",
     "status_wait_scan": "Please wait — scan in progress",
@@ -486,14 +540,26 @@ DEFAULT_LANGUAGE = {
     "settings_share_export": "Export current calendar (JSON)",
     "settings_share_import": "Import calendar (JSON)",
     "settings_data_box": "<b>Data safety</b>",
-    "settings_data_hint": "If external drives are disconnected, calendar entries become 'missing'. Do not auto-remove them — reconnect the drive first. Use the buttons below only when you are sure.",
-    "settings_find_missing": "🔍 Find missing files",
+    # [PATCH-1.1-05b]
+"settings_data_hint": "If external drives are disconnected, calendar entries become 'missing'. Do not auto-remove them — reconnect the drive first. \"Remove missing entries\" purges calendar entries whose files are gone; it does NOT relink to a new folder.",
+    # [PATCH-1.1-05a]
+"settings_find_missing": "🔍 Remove missing entries",
     "settings_restore_backup": "↶ Restore from backup",
     "info_no_missing_files": "No missing files found.",
     "title_clean_missing": "Clean missing files",
     "confirm_clean_missing": "{total} file(s) in calendar(s) no longer exist on disk.\nRemove these entries? (Files on disk are not touched.)",
+    # [PATCH-1.1-FIX2-04a]
     "status_cleaned_missing": "Removed {n} missing entries",
+    "title_relink": "Relink missing files",
+    "confirm_relink": "Do you want to find the folder with the missing files?\n\nOtherwise, the missing entries will be removed from the calendar.",
+    "relink_select_folder": "Select the NEW folder where the files are now located:",
+    "relink_success": "Relinked {n} file(s).",
     "status_finding_missing": "Finding missing files...",
+    "relink_ambiguous": "{n} file(s) skipped — multiple files with the same name were found in the selected folder. Rename duplicates or relink them manually.",
+    "status_applying_language": "Applying language\u2026",
+    "status_rebuilding_settings": "Rebuilding Settings\u2026",
+    "status_rebuilding_manager": "Rebuilding Manager\u2026",
+    "status_finalizing": "Finalizing\u2026",
     "info_no_backups": "No backups available.",
     "title_restore_backup": "Restore from backup",
     "label_restore_backup": "Select backup to restore:",
@@ -515,13 +581,17 @@ DEFAULT_LANGUAGE = {
     "manager_delete": "Delete",
     "help_title": "Guide",
     "help_import": "📁 Import",
-    "help_import_body": "Click «Add folder» or drag a folder from your file manager into the window.",
+    # [PATCH-1.1-FIX2-09]
+    "help_import_body": "Click «Add folder» or drag a folder from your file manager into the window.<br/><br/><b>Supported formats:</b><br/>Photos: JPG, JPEG, PNG, HEIC, HEIF, WEBP, BMP, TIFF<br/>Videos: MP4, MOV, AVI, MKV, WEBM",
     "help_views": "📅 Calendar views",
     "help_views_body": "Days, Months, Years, Events, Duplicates. Navigation: <b>Ctrl + wheel</b> to zoom.",
     "help_gallery": "🖼 Gallery",
     "help_gallery_body": "{modifier}+C/X/V/{delete}, right-click menu, double-click to open, ▲ and ▼ to scroll.",
     "help_viewer": "🔍 Viewer",
     "help_viewer_body": "Wheel — zoom, left drag — pan, ←/→ — prev/next, Esc — close.<br/><b>{delete} — delete, {modifier}+C — copy, {modifier}+E — event</b>.<br/>Buttons <b>↺</b> and <b>↻</b> rotate left/right.",
+    # [PATCH-1.1-FIX2-09b]
+    "help_events": "🏷 Events",
+    "help_events_body": "Events are global virtual albums. You can add the same file to multiple events.<br/>They are independent of the active calendar (Calendar A and Calendar B can both have photos in 'Vacation 2024').<br/><br/>Open <b>View: Events</b> to see your events. Inside an event, you can export media files to a physical folder or export the event list to JSON.",
     "help_dups": "🗑 Duplicates",
     "help_dups_body": "The «Duplicates» view opens groups as cards. Click a card to open its files.<br/>«Delete duplicates» removes extra copies, keeping exactly one file per group.<br/>Groups per row is configurable (1–4).",
     "help_undo": "↶ Undo",
@@ -543,6 +613,11 @@ DEFAULT_LANGUAGE = {
     "no_preview": "No\npreview",
     "loading": "Loading...",
     "heic_unavailable": "HEIC: support unavailable",
+    # [PATCH-1.1-FIX15] rotate statuses + localized refusals
+    "status_rotating_check": "Checking image\u2026",
+    "status_rotating_save": "Saving rotated image\u2026",
+    "error_rotate_multiframe": "Cannot rotate multi-frame {ext} ({n} frames) safely.\n\nMulti-frame files are refused to prevent data loss \u2014 only the first frame would survive the rotation.\n\nUse an external tool (Apple Photos, Lightroom) to rotate this file.",
+    "error_rotate_symlink": "Cannot rotate a symlink. Rotate the target file instead.",
     "cannot_load": "Could not load: {name}",
     "file_unavailable": "File unavailable",
     "trash_restore_error": "File already exists",
@@ -675,7 +750,8 @@ class Translator(QObject):
             if _pk not in data and _pk in self._current:
                 merged[_pk] = self._current[_pk]
         self._current = merged
-        self._name = data.get("_language_name", Path(path).stem)
+        _raw_name = data.get("_language_name", Path(path).stem)
+        self._name = _raw_name if isinstance(_raw_name, str) else str(_raw_name)
         self.language_changed.emit()
 
     def export_to_file(self, path):
@@ -857,9 +933,8 @@ class _LocalizedMessageBox(metaclass=_LocalizedMessageBoxMeta):
             # x-close returns cancel
             if BT.Cancel in button_map:
                 return BT.Cancel
-            # NB-105: prefer any RejectRole button over blind No.
-            # If caller passed only Ok (no No/Cancel), "X" was
-            # previously returned as No, which caller didn't ask for.
+            if len(button_map) == 1 and BT.Ok in button_map:
+                return BT.Ok
             try:
                 for _bv, _bw in button_map.items():
                     if mb.buttonRole(_bw) == _RealQMessageBox.ButtonRole.RejectRole:
@@ -1028,6 +1103,9 @@ THEMES = {
         "danger": "#ef4444", "danger_dk": "#dc2626",
         "scroll_handle": "#cbd5e1", "scroll_handle_hover": "#94a3b8",
         "tooltip_text": "#ffffff",
+        # [PATCH-1.1-FIX9] progress bar colors
+        "progress_text": "#1f2937",
+        "progress_chunk": "#3b82f6",
     },
     "dark": {
         "bg": "#2b2b2b", "surface": "#383838", "primary": "#e0e0e0",
@@ -1036,6 +1114,12 @@ THEMES = {
         "danger": "#f87171", "danger_dk": "#dc2626",
         "scroll_handle": "#5a5a5a", "scroll_handle_hover": "#7a7a7a",
         "tooltip_text": "#1f2937",
+        # [PATCH-1.1-FIX9] progress bar colors.
+        # Dark-yellow text (#b8860b) on the light-gray chunk (#e0e0e0) --
+        # previously text was #f5f5f5 (light) on #e0e0e0 (light) and
+        # disappeared as soon as the bar filled.
+        "progress_text": "#b8860b",
+        "progress_chunk": "#e0e0e0",
     },
 }
 
@@ -1053,6 +1137,9 @@ COLOR_DANGER_DK = "#dc2626"
 COLOR_SCROLL_HANDLE = "#cbd5e1"
 COLOR_SCROLL_HANDLE_HOVER = "#94a3b8"
 COLOR_TOOLTIP_TEXT = "#ffffff"
+# [PATCH-1.1-FIX9] progress bar text/chunk (per-theme)
+COLOR_PROGRESS_TEXT = "#1f2937"
+COLOR_PROGRESS_CHUNK = "#3b82f6"
 CURRENT_THEME = "light"
 
 
@@ -1061,6 +1148,7 @@ def apply_theme(name):
     global COLOR_PRIMARY_LT, COLOR_TEXT, COLOR_MUTED, COLOR_BORDER, COLOR_HOVER
     global COLOR_DANGER, COLOR_DANGER_DK, COLOR_SCROLL_HANDLE, COLOR_SCROLL_HANDLE_HOVER
     global COLOR_TOOLTIP_TEXT
+    global COLOR_PROGRESS_TEXT, COLOR_PROGRESS_CHUNK
     if name not in THEMES:
         name = "light"
     CURRENT_THEME = name
@@ -1079,6 +1167,8 @@ def apply_theme(name):
     COLOR_SCROLL_HANDLE = th["scroll_handle"]
     COLOR_SCROLL_HANDLE_HOVER = th["scroll_handle_hover"]
     COLOR_TOOLTIP_TEXT = th["tooltip_text"]
+    COLOR_PROGRESS_TEXT = th.get("progress_text", "#1f2937")
+    COLOR_PROGRESS_CHUNK = th.get("progress_chunk", "#3b82f6")
 
 
 apply_theme("light")
@@ -1149,7 +1239,14 @@ def move_to_trash(filepath, max_retries=5):  # 10 retries × 0.15s
                     # pathological — bail out instead of loop
                     raise OSError(
                         f"trash name collision for {base}")
-            shutil.move(filepath, trash_path)
+            try:
+                shutil.move(filepath, trash_path)
+            except Exception:
+                # [PATCH-1.1-FIX10-04] restore original mode on failed move
+                if _orig_mode is not None and os.path.exists(filepath):
+                    try: os.chmod(filepath, _orig_mode)
+                    except OSError: pass
+                raise
             # NB-134: preserve original read-only mode in trash so
             # Ctrl+Z restore returns the file with its intended mode.
             if _orig_mode is not None:
@@ -1205,7 +1302,25 @@ def restore_from_trash(trash_path, original_path):
         os.makedirs(os.path.dirname(original_path) or ".", exist_ok=True)
         if os.path.exists(original_path):
             return False, Exception(t("trash_restore_error"))
-        shutil.move(trash_path, original_path)
+        # [PATCH-1.1-FIX10-02] atomic restore for cross-FS safety
+        dir_ = os.path.dirname(original_path) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".rst_", dir=dir_)
+        os.close(fd)
+        try:
+            shutil.copy2(trash_path, tmp)
+            os.replace(tmp, original_path)
+        except Exception:
+            if os.path.exists(tmp):
+                try: os.remove(tmp)
+                except OSError: pass
+            raise
+        try:
+            # [PATCH-1.1-FIX16-C4] Windows cannot unlink read-only.
+            if os.name == 'nt':
+                os.chmod(trash_path, stat.S_IWRITE)
+            os.remove(trash_path)
+        except OSError:
+            pass
         return True, None
     except Exception as e:
         return False, e
@@ -1249,7 +1364,13 @@ def clean_trash(days=7):
                 if ts_sec < 1_000_000_000:  # pre-2001-09-09, not ours
                     continue
                 if ts_sec < cutoff:
-                    f.unlink()
+                    try:
+                        # [PATCH-1.1-FIX10-03] Windows read-only unlink
+                        if os.name == 'nt':
+                            os.chmod(f, stat.S_IWRITE)
+                        f.unlink()
+                    except OSError:
+                        pass
             except (OSError, ValueError):
                 pass
     except Exception:
@@ -1425,10 +1546,16 @@ def _backup_calendar_data(path, reason=""):
 
 def get_cache_size_mb(cache_dir):
     try:
-        # NB-113: only count files WE created (same pattern as
-        # clear_cache / _AutoCleanWorker). Previously any *.jpg in
-        # cache_dir was summed; if user pointed cache at a photo
-        # folder, "Used: N MB" wildly misreported.
+        _s = str(cache_dir) if cache_dir is not None else ""
+        if not _s or _s in (".", "") or not Path(_s).is_absolute():
+            return 0.0
+        _p = Path(_s)
+        try:
+            _p = _p.resolve()
+        except Exception:
+            pass
+        if _p.parent == _p:
+            return 0.0
         return sum(
             f.stat().st_size
             for f in Path(cache_dir).glob("*.jpg")
@@ -1585,16 +1712,38 @@ def get_exif_date(filepath):
             candidates.append(exif.get(306))
             candidates.append(exif.get(36867))
             candidates.append(exif.get(36868))
+            # [PATCH-1.1-03]
+            # [PATCH-1.1-FIX6-05]
+            _formats = (
+                "%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S",
+                "%Y/%m/%d %H:%M:%S", "%Y:%m:%d", "%Y-%m-%d", "%Y/%m/%d",
+                "%Y:%m:%d %H:%M", "%Y-%m-%d %H:%M",
+            )
             for val in candidates:
                 if not val:
                     continue
                 if isinstance(val, bytes):
-                    val = val.decode("ascii", errors="ignore")
-                try:
-                    return datetime.datetime.strptime(
-                        str(val).strip(), "%Y:%m:%d %H:%M:%S").date()
-                except ValueError:
+                    try:
+                        val = val.decode("ascii", errors="ignore")
+                    except Exception:
+                        val = str(val)
+                _s = str(val).strip()
+                if not _s:
                     continue
+                # strip subseconds "2018:05:15 10:30:45.123"
+                _s = re.sub(r"\.\d+$", "", _s)
+                # strip timezone "2018:05:15 10:30:45+03:00"
+                _s = re.sub(r"\s*[+-]\d{2}:?\d{2}\s*$", "", _s)
+                _s = _s.strip()
+                for _fmt in _formats:
+                    try:
+                        return datetime.datetime.strptime(
+                            _s, _fmt).date()
+                    except ValueError:
+                        continue
+            logger.debug(
+                f"get_exif_date: no valid date; candidates="
+                f"{[repr(c) for c in candidates if c]}")
     except Exception as e:
         logger.debug(f"get_exif_date failed for {filepath}: {e}")
     return None
@@ -1861,9 +2010,11 @@ def _extract_video_frame(filepath, timeout=5.0):  # preview timeout
     if t.is_alive():
         logger.warning(f"Video frame extraction timed out after {timeout}s: {filepath}")
         return None  # do not read result — worker may still write
+    # [PATCH-1.1-FIX4-06a]
     img = result["img"]
     if img is None:
-        logger.info(f"Could not extract video frame from {filepath}")
+        if os.path.exists(filepath):
+            logger.info(f"Could not extract video frame from {filepath}")
     return img
 
 
@@ -1881,6 +2032,9 @@ def generate_quad_thumbnail(filepaths, size=600):
         with Image.open(fp) as raw:
             return ImageOps.exif_transpose(raw).convert("RGB")
 
+    if size % 2:
+        size += 1
+        canvas = Image.new("RGB", (size, size), (240, 242, 245))
     half = size // 2
     if n == 1:
         try:
@@ -1929,7 +2083,10 @@ class _AutoCleanWorker(QRunnable):
     """Runs cache/trash cleanup off the UI thread."""
     def __init__(self, cache_dir, cache_days, trash_days):
         super().__init__()
-        self.cache_dir = Path(cache_dir)
+        try:
+            self.cache_dir = Path(cache_dir) if cache_dir else Path(".")
+        except Exception:
+            self.cache_dir = Path(".")
         self.cache_days = cache_days
         self.trash_days = trash_days
         self.setAutoDelete(True)
@@ -1995,11 +2152,20 @@ class ScannerThread(QThread):
     progress = Signal(int, int)
     file_found = Signal(str, str)
 
-    def __init__(self, root_path, priority_list):
+    def __init__(self, root_path, priority_list, extra_skip_paths=None):
         super().__init__()
         self.root_path = root_path
         self.priority_list = priority_list
         self._running = True
+        # [PATCH-1.1-FIX15-A6] app-owned dirs that shouldn't be indexed
+        # (custom cache_dir, custom trash_dir, data dirs).
+        self._extra_skip = []
+        if extra_skip_paths:
+            for p in extra_skip_paths:
+                try:
+                    self._extra_skip.append(Path(p).resolve())
+                except Exception:
+                    pass
 
     def stop(self):
         self._running = False
@@ -2007,6 +2173,17 @@ class ScannerThread(QThread):
 
     def run(self):
         total = 0
+        # [PATCH-1.1-FIX15-A6] build skip-set ONCE, apply to BOTH
+        # phases (counting + emitting). Include LOG_DIR and any
+        # user-configured cache_dir/trash_dir so custom locations
+        # aren't indexed as originals; also fixes overstated total.
+        _skip_paths = set()
+        for p in (DATA_DIR, TRASH_DIR, BACKUP_DIR, DEFAULT_CACHE_DIR,
+                  LOG_DIR):
+            try: _skip_paths.add(p.resolve())
+            except Exception: pass
+        for p in self._extra_skip:
+            _skip_paths.add(p)
         try:
             for root, dirs, files in os.walk(self.root_path, followlinks=False):
                 # (NB-30): cooperative cancel during counting phase.
@@ -2016,6 +2193,14 @@ class ScannerThread(QThread):
                 # take 10+ seconds.
                 if not self._running:
                     return
+                # [PATCH-1.1-FIX15-A6] apply skip-set in counting phase
+                try:
+                    _rp_c = Path(root).resolve()
+                    if _rp_c in _skip_paths or any(_rp_c.is_relative_to(sp) for sp in _skip_paths):
+                        dirs[:] = []
+                        continue
+                except Exception:
+                    pass
                 dirs[:] = [d for d in dirs if d.lower() not in SKIP_DIRS and not d.startswith(".")]
                 total += sum(1 for f in files if f.lower().endswith(VALID_EXTS_TUPLE))
         except Exception:
@@ -2024,16 +2209,31 @@ class ScannerThread(QThread):
             return
         self.progress.emit(0, total)
         processed = 0
+        # [PATCH-1.1-09a]
+        _dir_count = 0
+        # [PATCH-1.1-FIX15-A6] _skip_paths already built above; reuse.
         try:
             for root, dirs, files in os.walk(self.root_path, followlinks=False):
                 if not self._running:
                     break
+                try:
+                    _rp = Path(root).resolve()
+                    if _rp in _skip_paths or any(_rp.is_relative_to(sp) for sp in _skip_paths):
+                        dirs[:] = []
+                        continue
+                except Exception:
+                    pass
+                _dir_count += 1
+                if _dir_count % 100 == 0:
+                    logger.info(f"Scanner: visited {_dir_count} dirs, current: {root}")
                 dirs[:] = [d for d in dirs if d.lower() not in SKIP_DIRS and not d.startswith(".")]
                 folder_name = os.path.basename(root)
                 for file in files:
                     if not self._running:
                         break
                     if not file.lower().endswith(VALID_EXTS_TUPLE):
+                        continue
+                    if file.startswith("._"):
                         continue
                     filepath = os.path.join(root, file)
                     date_obj = get_file_date(filepath, folder_name, self.priority_list)
@@ -2109,19 +2309,62 @@ class DuplicateScanThread(QThread):
 # ============================================================
 #                     THUMBNAILS
 # ============================================================
+# [PATCH-1.1-FIX4-02a]
+# [PATCH-1.1-FIX8-02]
+class PreviewCounterThread(QThread):
+    """[PATCH-1.1-FIX9d] Counts how many files are missing previews
+    in a given list. Emits (total, missing) when done."""
+    done = Signal(int, int)
+
+    def __init__(self, filepaths, cache_dir):
+        super().__init__()
+        self.filepaths = list(filepaths)
+        self.cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
+        self._running = True
+
+    def stop(self):
+        self._running = False
+        self.wait(2000)
+
+    def run(self):
+        total = len(self.filepaths)
+        missing = 0
+        try:
+            for i, fp in enumerate(self.filepaths):
+                if not self._running:
+                    return
+                cp = get_cache_path(fp, self.cache_dir)
+                if not cp or not cp.exists():
+                    missing += 1
+        except Exception:
+            pass
+        if self._running:
+            self.done.emit(total, missing)
+
+
 class ThumbnailSignals(QObject):
     result = Signal(QImage, str)
+    
+    def __init__(self, is_bg=False):
+        super().__init__()
+        self.is_bg = is_bg
+        self._worker = None
 
 
+# [PATCH-1.1-FIX4-02b]
 class ThumbnailLoader(QRunnable):
-    def __init__(self, filepaths, key=None, is_single=False, cache_dir=None):
+    def __init__(self, filepaths, key=None, is_single=False, cache_dir=None, is_bg=False):
         super().__init__()
         self.filepaths = filepaths
         self.key = key
         self.is_single = is_single
+        self.is_bg = is_bg
         self.cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
-        self.signals = ThumbnailSignals()
-        self.setAutoDelete(True)
+        # [PATCH-1.1-FIX6-03]
+        # [PATCH-1.1-FIX8C-03]
+        self.signals = ThumbnailSignals(is_bg)
+        self.signals._worker = self
+        self.setAutoDelete(False)
 
     @Slot()
     def run(self):
@@ -2222,10 +2465,13 @@ class ThumbnailLoader(QRunnable):
                         qimg.save(str(cache_path), "JPEG", 78)
                     except Exception:
                         pass
+        # [PATCH-1.1-FIX4-06b]
         except Exception as e:
-            # HEIC: elevated to warning so thumbnail failures
-            # show up in app.log without a full logging overhaul.
-            logger.warning(f"Thumbnail error: {e}")
+            # Don't spam on missing files (they may be deleted)
+            if "No such file" not in str(e):
+                logger.warning(f"Thumbnail error: {e}")
+            else:
+                logger.debug(f"Thumbnail missing: {e}")
         try:
             self.signals.result.emit(qimg, self.key)
         except RuntimeError:
@@ -2328,13 +2574,23 @@ class CalendarView(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        # [PATCH-1.1-FIX4-04a]
         self.items = {}
         self.threadpool = QThreadPool()
         self.threadpool.setMaxThreadCount(4)
+        self._bg_pool = QThreadPool()
+        self._bg_pool.setMaxThreadCount(2)
+        # [PATCH-1.1-FIX8-06a]
+        self._bg_pending = 0
+        self._first_load_done = False
         self.setAcceptDrops(False)
         self.current_mode = "days"
         self.cache_dir = None
         self._pending = []
+        # [PATCH-1.1-FIX15-B3] key -> (item, fps) for in-flight async
+        # loads, so on_loaded() can retry on transient null.
+        self._pending_by_key = {}
+        self._retry_keys = set()
         self._load_timer = QTimer(self)
         self._load_timer.setSingleShot(True)
         self._load_timer.setInterval(50)
@@ -2350,41 +2606,118 @@ class CalendarView(QGraphicsView):
         if self._pending:
             self._load_timer.start()
 
+    # [PATCH-1.1-FIX7-05]
     def _load_visible(self):
         if not self._pending:
             return
+        _bg = getattr(self.window(), "config", {}).get("bg_thumb_gen", False)
         vp = self.viewport().rect()
         src = self.mapToScene(vp).boundingRect()
         still = []
-        loaded = 0
+        _visible_items = []
+        _invisible_items = []
         for item, fps in self._pending:
             try:
                 rect = item.sceneBoundingRect()
             except RuntimeError:
-                # catch RuntimeError — item deleted, drop it
                 continue
             if rect.intersects(src):
-                if loaded < 4:
-                    w = ThumbnailLoader(fps, key=item.key, is_single=False, cache_dir=self.cache_dir)
-                    w.signals.result.connect(self.on_loaded)
-                    self.threadpool.start(w)
-                    loaded += 1
-                else:
-                    still.append((item, fps))
+                _visible_items.append((item, fps))
             else:
-                still.append((item, fps))
-        self._pending = still
-        # NB-23: only re-arm when this tick actually loaded
-        # something. If loaded==0, all remaining items are off-screen;
-        # a scroll/resize will call _schedule again. Otherwise the
-        # timer spins every 50ms doing O(n) sceneBoundingRect calls.
-        if self._pending and loaded > 0:
+                _invisible_items.append((item, fps))
+
+        # [PATCH-1.1-FIX8C-07]
+        # Fallback when layout not ready yet (first load only)
+        if not _visible_items and not getattr(self, "_first_load_done", True):
+            self._first_load_done = True
+            _fb_items = self._pending[:10]
+            _visible_items.extend(_fb_items)
+            _fb_ids = {id(it) for it, _ in _fb_items}
+            _invisible_items = [(it, fps) for it, fps in _invisible_items
+                                if id(it) not in _fb_ids]
+
+        # PHASE 1: sync cache for all visible cards (instant)
+        async_queued = 0
+        SYNC_MAX = 50
+        _visible_still = []
+        for idx, (item, fps) in enumerate(_visible_items):
+            if idx < SYNC_MAX:
+                _sync_loaded = False
+                try:
+                    key_parts = "|".join(fps[:4])
+                    try:
+                        mtimes = [str(os.stat(f).st_mtime_ns) for f in fps[:4] if os.path.exists(f)]
+                        key_parts += "|" + "|".join(mtimes)
+                    except OSError:
+                        pass
+                    key_hash = hashlib.sha1(key_parts.encode()).hexdigest()
+                    cache_path = Path(self.cache_dir) / f"q_{key_hash}.jpg"
+                    if cache_path.exists():
+                        _qi = QImage(str(cache_path))
+                        if not _qi.isNull():
+                            item.pixmap = QPixmap.fromImage(_qi)
+                            item.update()
+                            _sync_loaded = True
+                except Exception:
+                    pass
+                if _sync_loaded:
+                    continue
+            # Async limit per tick
+            if async_queued >= 4:
+                _visible_still.append((item, fps))
+                continue
+            w = ThumbnailLoader(fps, key=item.key, is_single=False,
+                                cache_dir=self.cache_dir)
+            w.signals.result.connect(self.on_loaded)
+            # [PATCH-1.1-FIX15-B3] remember so null result can retry
+            self._pending_by_key[item.key] = (item, fps)
+            self.threadpool.start(w)
+            async_queued += 1
+
+        self._pending = _visible_still + _invisible_items
+
+        # PHASE 2: bg generation for off-screen items
+        if _bg and self._pending:
+            _to_load = 4
+            still_after = []
+            for item, fps in self._pending:
+                if _to_load <= 0:
+                    still_after.append((item, fps))
+                    continue
+                w = ThumbnailLoader(fps, key=item.key, is_single=False,
+                                    cache_dir=self.cache_dir, is_bg=True)
+                w._bg_gen = self.window()._bg_gen  # [PATCH-1.1-FIX9b]
+                w.signals.result.connect(self.on_loaded)
+                self._bg_pool.start(w)
+                self._bg_pending += 1
+                # indeterminate in calendar mode -- no _bg_total
+                _to_load -= 1
+            self._pending = still_after
+            if self._bg_pending > 0:
+                try:
+                    self.window()._update_bg_progress()
+                except Exception:
+                    pass
+
+        # [PATCH-1.1-FIX9-02a]
+        # Only restart timer if there is visible work or bg enabled.
+        # Previously restarted unconditionally: with bg_thumb_gen=False
+        # and only off-screen items left, the 50ms tick kept firing
+        # forever (CPU waste + looked like bg generation still running).
+        if self._pending and (_bg or _visible_still):
             self._load_timer.start()
 
+    # [PATCH-1.1-FIX8-06b]
     def update_data(self, data, categories, mode, cache_dir):
         self.scene_.clear()
         self.items.clear()
         self._pending.clear()
+        # [PATCH-1.1-FIX15-B3] clear retry state so old keys
+        # don't accumulate across calendar switches.
+        self._pending_by_key.clear()
+        self._retry_keys.clear()
+        self._first_load_done = False
+        self.window()._flush_bg_queue()  # [PATCH-1.1-FIX9c]
         self.current_mode = mode
         self.cache_dir = cache_dir
         if not data and mode != "events":
@@ -2576,8 +2909,48 @@ class CalendarView(QGraphicsView):
                 col = 0
                 row += 1
 
+    # [PATCH-1.1-FIX4-04e]
+    # [PATCH-1.1-FIX7-06c]
+    # [PATCH-1.1-FIX8-08]
     @Slot(QImage, str)
     def on_loaded(self, qimg, key):
+        _sender = self.sender()
+        if _sender is not None:
+            _worker = getattr(_sender, "_worker", None)
+            if getattr(_sender, "is_bg", False):
+                # [PATCH-1.1-FIX16-C14] check generation BEFORE decrementing
+                if _worker is not None and getattr(_worker, "_bg_gen", -1) == self.window()._bg_gen:
+                    self._bg_pending = max(0, self._bg_pending - 1)
+                    try:
+                        self.window()._bg_done += 1
+                        QTimer.singleShot(
+                            0, self.window()._update_bg_progress)
+                    except Exception:
+                        pass
+                else:
+                    return  # stale task, do not touch _bg_pending
+            # [PATCH-1.1-FIX9-03] QRunnable has no .deleteLater() --
+            # previous code raised AttributeError on every thumbnail.
+            # Break the Python ref cycle so the runnable can be GC'd.
+            try:
+                _sender._worker = None
+            except Exception:
+                pass
+        # [PATCH-1.1-FIX11] retry on transient null
+        # [PATCH-1.1-FIX15-B3] use _pending_by_key — the (item, fps)
+        # pair was removed from _pending when the async task started,
+        # so the old lookup could never find it and retry never fired.
+        if qimg.isNull():
+            if key not in self._retry_keys:
+                _pair = self._pending_by_key.get(key)
+                if _pair is not None:
+                    self._retry_keys.add(key)
+                    self._pending.append(_pair)
+                    self._schedule()
+            return
+        # success — drop from retry map
+        self._pending_by_key.pop(key, None)
+        self._retry_keys.discard(key)
         if key in self.items and not qimg.isNull():
             try:
                 self.items[key].pixmap = QPixmap.fromImage(qimg)
@@ -2592,7 +2965,11 @@ class CalendarView(QGraphicsView):
         super().mousePressEvent(event)
 
     def wheelEvent(self, event):
-        if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+        _zoom_mod = (Qt.KeyboardModifier.ControlModifier
+                     | Qt.KeyboardModifier.MetaModifier
+                     if platform.system() == "Darwin"
+                     else Qt.KeyboardModifier.ControlModifier)
+        if event.modifiers() & _zoom_mod:
             f = 1.15 if event.angleDelta().y() > 0 else 0.85
             self.scale(f, f)
             event.accept()
@@ -2630,8 +3007,15 @@ class GalleryListWidget(QListWidget):
         self._file_to_item = {}
         self._pending = set()
         self._retry_done = set()  # NB-13: cap retry at 1 per file
+        # [PATCH-1.1-FIX3-F1]
         self.threadpool = QThreadPool()
         self.threadpool.setMaxThreadCount(4)
+        # [PATCH-1.1-FIX4-03a]
+        self._bg_pool = QThreadPool()
+        self._bg_pool.setMaxThreadCount(2)
+        # [PATCH-1.1-FIX8-09a]
+        self._bg_pending = 0
+        self._first_load_done = False
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(80)
@@ -2650,11 +3034,14 @@ class GalleryListWidget(QListWidget):
             f"QListWidget::item:selected {{ border: 2px solid {COLOR_PRIMARY}; "
             f"background-color: {COLOR_PRIMARY_LT}; color: {COLOR_TEXT}; }}")
 
+    # [PATCH-1.1-FIX8-09b]
     def clear_all(self):
         self.clear()
         self._file_to_item.clear()
         self._pending.clear()
         self._retry_done.clear()  # NB-13
+        self._first_load_done = False
+        self.window()._flush_bg_queue()  # [PATCH-1.1-FIX9c]
 
     def remove_item_by_filepath(self, filepath):
         self._pending.discard(filepath)
@@ -2695,17 +3082,22 @@ class GalleryListWidget(QListWidget):
         self._pending.add(filepath)
         self.addItem(item)
 
+    # [PATCH-1.1-FIX3-F3]
     def start_loading(self):
         self._update_headers()
+        # Immediate first pass for instant icons from cache
+        self._load_visible()
         self._schedule()
 
     def _schedule(self, *_):
         if self._pending:
             self._timer.start()
 
+    # [PATCH-1.1-FIX7-04]
     def _load_visible(self):
         if not self._pending:
             return
+        _bg = getattr(self.window(), "config", {}).get("bg_thumb_gen", False)
         vp = self.viewport().rect()
         vis = []
         for i in range(self.count()):
@@ -2716,18 +3108,117 @@ class GalleryListWidget(QListWidget):
             if not self.visualItemRect(item).intersects(vp):
                 continue
             vis.append((item, fp))
-        for item, fp in vis[:5]:
+        
+        # [PATCH-1.1-FIX8C-10]
+        # Fallback when layout isn't ready yet (first load only)
+        if not vis and not getattr(self, "_first_load_done", True):
+            self._first_load_done = True
+            for fp in list(self._pending)[:10]:
+                it = self._file_to_item.get(fp)
+                if it is not None:
+                    vis.append((it, fp))
+
+        # PHASE 1: sync cache for ALL visible items (instant).
+        async_queued = 0
+        _vis_pending = 0  # [PATCH-1.1-FIX9-02b]
+        SYNC_MAX = 100
+        for idx, (item, fp) in enumerate(vis):
+            if fp not in self._pending:
+                continue
+            if idx < SYNC_MAX:
+                _sync_loaded = False
+                try:
+                    _cp = get_cache_path(fp, self.cache_dir)
+                    if _cp and _cp.exists():
+                        _qi = QImage(str(_cp))
+                        if not _qi.isNull():
+                            # [PATCH-1.1-FIX15-V1] apply play overlay
+                            # to cached video thumbs — was missing in
+                            # sync path; only async _on_thumb had it.
+                            _pix = QPixmap.fromImage(_qi)
+                            _pix = self._apply_video_overlay(_pix, fp)
+                            item.setIcon(QIcon(_pix))
+                            self._pending.discard(fp)
+                            _sync_loaded = True
+                except Exception:
+                    pass
+                if _sync_loaded:
+                    continue
+            # Not cached — queue async (max 5 per tick)
+            if async_queued >= 5:
+                _vis_pending += 1
+                continue
             self._pending.discard(fp)
-            item.setData(ROLE_LOADED, True)
             w = ThumbnailLoader([fp], key=fp, is_single=True, cache_dir=self.cache_dir)
             w.signals.result.connect(self._on_thumb)
             self.threadpool.start(w)
-        if len(vis) > 5:
-            self._timer.start(50)
+            async_queued += 1
 
+        # PHASE 2: bg generation for off-screen items (if enabled)
+        if _bg and self._pending:
+            _to_load = 5 - async_queued
+            for fp in list(self._pending):
+                if _to_load <= 0:
+                    break
+                self._pending.discard(fp)
+                w = ThumbnailLoader([fp], key=fp, is_single=True,
+                                    cache_dir=self.cache_dir, is_bg=True)
+                w._bg_gen = self.window()._bg_gen  # [PATCH-1.1-FIX9b]
+                w.signals.result.connect(self._on_thumb)
+                self._bg_pool.start(w)
+                self._bg_pending += 1
+                # _bg_total is precomputed by _start_preview_count
+                _to_load -= 1
+            if self._bg_pending > 0:
+                try:
+                    self.window()._update_bg_progress()
+                except Exception:
+                    pass
+
+        # [PATCH-1.1-FIX9-02b]
+        # Same guard as CalendarView: only restart if visible work
+        # is left, or bg is enabled (bg needs continuous ticks).
+        if self._pending and (_bg or _vis_pending > 0):
+            self._timer.start(30)
+
+    # [PATCH-1.1-FIX4-03d]
+    # [PATCH-1.1-FIX7-06d]
+    # [PATCH-1.1-FIX8-11]
     @Slot(QImage, str)
     def _on_thumb(self, qimg, filepath):
+        _sender = self.sender()
+        if _sender is not None:
+            _worker = getattr(_sender, "_worker", None)
+            if getattr(_sender, "is_bg", False):
+                # [PATCH-1.1-FIX16-C14] check generation BEFORE decrementing
+                if _worker is not None and getattr(_worker, "_bg_gen", -1) == self.window()._bg_gen:
+                    self._bg_pending = max(0, self._bg_pending - 1)
+                    try:
+                        w = self.window()
+                        w._bg_done += 1
+                        if w._bg_owns_progress:
+                            w.progress_bar.setValue(
+                                min(w._bg_done, w._bg_total))
+                            w.statusBar().showMessage(
+                                t("status_bg_previews", done=w._bg_done, total=w._bg_total))
+                        if w._bg_done >= w._bg_total and w._bg_total > 0:
+                            # all done
+                            w._bg_owns_progress = False
+                            w.progress_bar.hide()
+                            w.progress_bar.setRange(0, 100)
+                            w.progress_bar.setFormat("%v / %m")
+                            w.statusBar().showMessage(
+                                t("status_bg_complete"), 3000)
+                    except Exception:
+                        pass
+            try:
+                _sender._worker = None
+            except Exception:
+                pass
         if qimg.isNull():
+            # [PATCH-1.1-FIX11] don't requeue if item was removed
+            if filepath not in self._file_to_item:
+                return
             # NB-13: one retry per file on transient failure
             # (auto-clean race, AV lock, network blip). Previously
             # the file stayed at "..." forever until scroll/resize.
@@ -2742,27 +3233,50 @@ class GalleryListWidget(QListWidget):
             return
         try:
             pixmap = QPixmap.fromImage(qimg)
-            ext = os.path.splitext(filepath)[1].lower()
-            if ext in VIDEO_EXTS:
-                p = QPainter(pixmap)
-                p.setRenderHint(QPainter.RenderHint.Antialiasing)
-                c = QPoint(pixmap.width() // 2, pixmap.height() // 2)
-                r = max(pixmap.width(), pixmap.height()) // 8
-                p.setBrush(QColor(0, 0, 0, 160))
-                p.setPen(Qt.PenStyle.NoPen)
-                p.drawEllipse(c, r, r)
-                p.setBrush(QColor(255, 255, 255))
-                # QPolygonF expects QPointF; QPoint worked via implicit
-                # conversion but is not guaranteed across PySide6 versions
-                p.drawPolygon(QPolygonF([
-                    QPointF(c.x() - r // 3, c.y() - r // 2),
-                    QPointF(c.x() - r // 3, c.y() + r // 2),
-                    QPointF(c.x() + r // 2, c.y()),
-                ]))
-                p.end()
+            # [PATCH-1.1-FIX15-V1] shared helper (was inline)
+            pixmap = self._apply_video_overlay(pixmap, filepath)
             item.setIcon(QIcon(pixmap))
         except RuntimeError:
             pass
+
+    @staticmethod
+    def _apply_video_overlay(pixmap, filepath):
+        """[PATCH-1.1-FIX15-V1] Draw a play-button overlay on video
+        thumbnails. Safe no-op for non-video files.
+
+        Shared by the async _on_thumb path AND the sync-cache path
+        in _load_visible, so cached videos always show the play
+        marker. Previously the sync-cache path skipped the overlay,
+        producing "some videos have the icon, some don't".
+        """
+        if pixmap.isNull():
+            return pixmap
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext not in VIDEO_EXTS:
+            return pixmap
+        w, h = pixmap.width(), pixmap.height()
+        if w <= 0 or h <= 0:
+            return pixmap
+        r = max(w, h) // 8
+        if r <= 0:
+            return pixmap
+        try:
+            p = QPainter(pixmap)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            c = QPoint(w // 2, h // 2)
+            p.setBrush(QColor(0, 0, 0, 160))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(c, r, r)
+            p.setBrush(QColor(255, 255, 255))
+            p.drawPolygon(QPolygonF([
+                QPointF(c.x() - r // 3, c.y() - r // 2),
+                QPointF(c.x() - r // 3, c.y() + r // 2),
+                QPointF(c.x() + r // 2, c.y()),
+            ]))
+            p.end()
+        except RuntimeError:
+            pass
+        return pixmap
 
     def _update_headers(self):
         w = self.viewport().width() - 30
@@ -2809,7 +3323,11 @@ class GalleryListWidget(QListWidget):
             self.files_moved_externally.emit(dragged)
 
     def wheelEvent(self, event):
-        if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+        _zoom_mod = (Qt.KeyboardModifier.ControlModifier
+                     | Qt.KeyboardModifier.MetaModifier
+                     if platform.system() == "Darwin"
+                     else Qt.KeyboardModifier.ControlModifier)
+        if event.modifiers() & _zoom_mod:
             d = event.angleDelta().y()
             if d > 0:
                 self.current_icon_size = min(400, self.current_icon_size + 20)
@@ -2855,7 +3373,30 @@ class DuplicateThumbnail(QLabel):
         except Exception as e:
             logger.debug(f"DuplicateThumbnail load failed: {e}")
 
+    # [PATCH-1.1-FIX8-12]
     def _on_thumb(self, qimg, _):
+        _sender = self.sender()
+        if _sender is not None:
+            # [PATCH-1.1-FIX9-03] break ref cycle; QRunnable has no
+            # .deleteLater() -- old call raised AttributeError.
+            try:
+                _sender._worker = None
+            except Exception:
+                pass
+        # [PATCH-1.1-FIX11] retry on transient null
+        if qimg.isNull():
+            if not getattr(self, "_retry_done", False):
+                self._retry_done = True
+                try:
+                    _w = ThumbnailLoader(
+                        [self.filepath], key=self.filepath,
+                        is_single=True, cache_dir=self._cache_dir)
+                    _w.signals.result.connect(self._on_thumb)
+                    if self._threadpool:
+                        self._threadpool.start(_w)
+                except Exception:
+                    pass
+            return
         try:
             if not qimg.isNull():
                 self.original_pixmap = QPixmap.fromImage(qimg)
@@ -3092,7 +3633,11 @@ class DuplicateGalleryWidget(QScrollArea):
         self.grid.setRowStretch(cur_row + 1, 1)
 
     def wheelEvent(self, event):
-        if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+        _zoom_mod = (Qt.KeyboardModifier.ControlModifier
+                     | Qt.KeyboardModifier.MetaModifier
+                     if platform.system() == "Darwin"
+                     else Qt.KeyboardModifier.ControlModifier)
+        if event.modifiers() & _zoom_mod:
             d = event.angleDelta().y()
             self.thumb_size = min(400, self.thumb_size + 20) if d > 0 else max(100, self.thumb_size - 20)
             self.inner.setUpdatesEnabled(False)
@@ -3131,7 +3676,9 @@ class GalleryWidget(QWidget):
     remove_from_event = Signal(list)
     delete_duplicates = Signal()
     undo_requested = Signal()
+    # [PATCH-1.1-07b]
     redo_requested = Signal()
+    export_media_requested = Signal()
 
     def __init__(self):
         super().__init__()
@@ -3189,9 +3736,13 @@ class GalleryWidget(QWidget):
         self.btn_redo = QPushButton(t("btn_redo"))
         self.btn_redo.clicked.connect(self.redo_requested.emit)
 
+        # [PATCH-1.1-07c]
         self.btn_cut = QPushButton(t("btn_cut"))
         self.btn_copy = QPushButton(t("btn_copy"))
         self.btn_delete = QPushButton(t("btn_delete"))
+        self.btn_export_media = QPushButton(t("btn_export_media"))
+        self.btn_export_media.clicked.connect(self.export_media_requested.emit)
+        self.btn_export_media.hide()
         self.btn_delete_dups = QPushButton(t("btn_delete_dups"))
         self.btn_delete_dups.clicked.connect(self.delete_duplicates.emit)
         self.btn_delete_dups.hide()
@@ -3201,7 +3752,9 @@ class GalleryWidget(QWidget):
         top.addWidget(self.btn_delete_dups)
         top.addWidget(self.btn_cut)
         top.addWidget(self.btn_copy)
+        # [PATCH-1.1-07d]
         top.addWidget(self.btn_delete)
+        top.addWidget(self.btn_export_media)
 
         layout.addLayout(top)
         layout.addWidget(self.stack)
@@ -3233,6 +3786,7 @@ class GalleryWidget(QWidget):
         self.stack.setCurrentIndex(1)
         self.btn_delete_dups.show()
         self.btn_back.hide()
+        self.btn_export_media.hide()
         self.lbl_title.setText(t("gallery_duplicates_title", n=len(groups)))
         self.dup_gallery.set_groups(groups, cache_dir, cols)
 
@@ -3248,6 +3802,7 @@ class GalleryWidget(QWidget):
         self.btn_copy.setText(t("btn_copy"))
         self.btn_delete.setText(t("btn_delete"))
         self.btn_delete_dups.setText(t("btn_delete_dups"))
+        self.btn_export_media.setText(t("btn_export_media"))
         self.btn_scroll_top.setText(t("scroll_top"))
         self.btn_scroll_bottom.setText(t("scroll_bottom"))
 
@@ -3261,6 +3816,58 @@ class GalleryWidget(QWidget):
                 f"font-weight: 600; font-size: 13px; }} "
                 f"QPushButton:hover {{ background-color: {COLOR_DANGER_DK}; }}")
 
+    def _start_preview_count(self, grouped_data):
+        """[PATCH-1.1-FIX9d] Count missing previews for the given data
+        in a background thread, then set _bg_total."""
+        # [PATCH-1.1-FIX9e] Do not count or show progress if feature is disabled
+        if not self.window().config.get("bg_thumb_gen", False):
+            return
+        all_files = []
+        for files in grouped_data.values():
+            all_files.extend(files)
+        if not all_files:
+            return
+        if hasattr(self, '_preview_counter') and self._preview_counter is not None:
+            if self._preview_counter.isRunning():
+                self._preview_counter.stop()
+            self._preview_counter = None
+        w = self.window()
+        w._bg_total = 0
+        w._bg_done = 0
+        w._bg_owns_progress = False
+        w.progress_bar.setRange(0, 0)
+        w.progress_bar.setFormat(t("status_counting_previews"))
+        w.progress_bar.show()
+        self._preview_counter = PreviewCounterThread(
+            all_files, self.list_widget.cache_dir)
+        # [PATCH-1.1-FIX15-P2-6] capture _bg_gen so a stale counter
+        # (previous gallery/calendar whose stop() didn't finish in
+        # time) is rejected — same pattern as _on_thumb.
+        _captured_gen = w._bg_gen
+        def _on_count(total, missing):
+            if not self.window().config.get("bg_thumb_gen", False):
+                return  # [PATCH-1.1-FIX9e] feature turned off mid-count
+            if w._bg_gen != _captured_gen:
+                return  # stale result from a previous gallery
+            if not missing:
+                w.progress_bar.hide()
+                w.progress_bar.setRange(0, 100)
+                w.progress_bar.setFormat("%v / %m")
+                return
+            w._bg_total = missing
+            w._bg_done = 0
+            w._bg_owns_progress = True
+            w.progress_bar.setRange(0, w._bg_total)
+            w.progress_bar.setValue(0)
+            w.progress_bar.setFormat("%v / %m")
+            w.progress_bar.show()
+            w.statusBar().showMessage(
+                t("status_bg_previews", done=0, total=w._bg_total))
+            # trigger loading after count
+            self.list_widget._schedule()
+        self._preview_counter.done.connect(_on_count)
+        self._preview_counter.start()
+
     def set_grouped_files(self, title, grouped_data, duplicates_set, cache_dir):
         self.lbl_title.setText(title)
         self.raw_grouped_data = grouped_data
@@ -3268,9 +3875,14 @@ class GalleryWidget(QWidget):
         self.list_widget.cache_dir = cache_dir
         self.is_dups_mode = False
         self.stack.setCurrentIndex(0)
+        # [PATCH-1.1-07e]
         self.btn_delete_dups.hide()
         self.btn_back.show()
+        self.btn_export_media.setVisible(False)
+        if hasattr(self.window(), "combo_view_mode") and self.window().combo_view_mode.currentIndex() == 3:
+            self.btn_export_media.setVisible(True)
         self.refresh_view()
+        self._start_preview_count(grouped_data)
 
     def get_files_to_delete_as_dups(self):
         # keep one per group 
@@ -3485,17 +4097,20 @@ class AssignEventDialog(QDialog):
 # ============================================================
 #                     IMAGE VIEWER
 # ============================================================
+# [PATCH-1.1-01a]
 class ViewerGraphicsView(QGraphicsView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_filepath = None
         self.drag_start_pos = None
+        self._is_fitted = True  # True when image is at fit-zoom
 
     def wheelEvent(self, event):
         # wheel zoom on QGraphicsView
         if self.scene() and self.scene().items():
             factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
             self.scale(factor, factor)
+            self._is_fitted = False
             event.accept()
         else:
             super().wheelEvent(event)
@@ -3506,9 +4121,12 @@ class ViewerGraphicsView(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        # Left-drag starts file DnD when image is at fit zoom
+        _can_dnd = self._is_fitted or bool(
+            event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         if (event.buttons() & Qt.MouseButton.LeftButton
                 and self.current_filepath and os.path.exists(self.current_filepath)
-                and (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)):
+                and _can_dnd):
             if self.drag_start_pos is not None:
                 if (event.position().toPoint() - self.drag_start_pos).manhattanLength() > QApplication.startDragDistance():
                     mime = QMimeData()
@@ -3519,6 +4137,13 @@ class ViewerGraphicsView(QGraphicsView):
                     self.drag_start_pos = None
                     return
         super().mouseMoveEvent(event)
+
+
+# [PATCH-1.1-FIX15-H2] dedicated exception for rotate refusals
+# whose message is already user-complete and localized (multi-frame,
+# HEIF unavailable). Bypasses the "Could not rotate: <err>" wrapper.
+class _RotateRefusedError(Exception):
+    pass
 
 
 class ImageViewer(QWidget):
@@ -3599,6 +4224,11 @@ class ImageViewer(QWidget):
         self.view.customContextMenuRequested.connect(
             lambda pos: self.show_context_menu(self.view.mapTo(self, pos)))
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # [PATCH-1.1-FIX15-H2] reentrancy guard for rotate — HEIC
+        # encode is slow (E9); a second click during the encode used
+        # to start a second parallel rotate and produce a duplicate
+        # refusal / save dialog.
+        self._rotating = False
 
         # QShortcut -> QAction refactor. Widget-context actions
         # created by rebind_hotkeys(config) -- called from
@@ -3711,74 +4341,96 @@ class ImageViewer(QWidget):
             self.lbl_counter.setText("")
         self.setFocus()
 
-    def update_view(self):
+    def update_view(self, preloaded_pixmap=None):
         if not (0 <= self.current_index < len(self.files)):
             return
         fp = self.files[self.current_index]
         self.view.current_filepath = fp
         self.scene_.clear()
         self.pixmap_item = None
-        reader = QImageReader(fp)
-        reader.setAutoTransform(True)
-        img = reader.read()
-        if img.isNull():
-            pixmap = QPixmap(fp)
+        # [PATCH-1.1-FIX12] use in-memory pixmap after rotate —
+        # skips full HEIC re-decode (~200-500ms saved per rotate)
+        if preloaded_pixmap is not None and not preloaded_pixmap.isNull():
+            pixmap = preloaded_pixmap
         else:
-            pixmap = QPixmap.fromImage(img)
-        # QImageReader can't decode HEIC without Qt plugin — PIL fallback
-        if pixmap.isNull():
-            try:
-                with Image.open(fp) as raw:
-                    pil_img = ImageOps.exif_transpose(raw).convert("RGB")
-                data = pil_img.tobytes("raw", "RGB")
-                qimg = QImage(data, pil_img.width, pil_img.height,
-                              pil_img.width * 3,
-                              QImage.Format.Format_RGB888).copy()
-                pixmap = QPixmap.fromImage(qimg)
-            except Exception as e:
-                logger.debug(f"viewer PIL fallback failed: {e}")
-                pixmap = QPixmap(fp)  # last resort (may still fail)
+            # [PATCH-1.1-FIX12] skip Qt attempt for HEIC — no HEIF
+            # plugin on most Windows/macOS; saves 10-30ms per open
+            _ext_v = os.path.splitext(fp)[1].lower()
+            pixmap = QPixmap()
+            if _ext_v not in (".heic", ".heif"):
+                reader = QImageReader(fp)
+                reader.setAutoTransform(True)
+                img = reader.read()
+                if img.isNull():
+                    pixmap = QPixmap(fp)
+                else:
+                    pixmap = QPixmap.fromImage(img)
+            # QImageReader can't decode HEIC without Qt plugin — PIL fallback
+            if pixmap.isNull():
+                try:
+                    with Image.open(fp) as raw:
+                        pil_img = ImageOps.exif_transpose(raw).convert("RGB")
+                    data = pil_img.tobytes("raw", "RGB")
+                    qimg = QImage(data, pil_img.width, pil_img.height,
+                                  pil_img.width * 3,
+                                  QImage.Format.Format_RGB888).copy()
+                    pixmap = QPixmap.fromImage(qimg)
+                except Exception as e:
+                    logger.debug(f"viewer PIL fallback failed: {e}")
+                    if _ext_v not in (".heic", ".heif"):
+                        pixmap = QPixmap(fp)  # last resort
         if pixmap.isNull():
             self.lbl_title.setText(t("cannot_load", name=os.path.basename(fp)))
             return
         self.pixmap_item = self.scene_.addPixmap(pixmap)
         self.scene_.setSceneRect(self.pixmap_item.boundingRect())
-        # NB-24: reuse last transform when navigating (next/prev).
-        # _saved_transform is set only by next_image/prev_image before
-        # they call update_view; any other caller (load_image, rotate,
-        # delete) leaves it None and gets fitInView.
+        # [PATCH-1.1-01d]
+        # Aspect-aware transform preservation:
+        #  - same orientation (diff < 20%) -> keep zoom
+        #  - orientation change -> auto-fit
+        _applied_saved = False
         if self._saved_transform is not None:
             try:
-                self.view.setTransform(self._saved_transform)
-            except RuntimeError:
+                _saved_tf, _old_aspect = self._saved_transform
+                _new_aspect = 0.0
+                _pm = self.pixmap_item.pixmap() if self.pixmap_item else None
+                if _pm is not None and not _pm.isNull() and _pm.height() > 0:
+                    _new_aspect = _pm.width() / _pm.height()
+                if (_old_aspect > 0 and _new_aspect > 0
+                        and abs(_new_aspect - _old_aspect) / _old_aspect < 0.20):
+                    self.view.setTransform(_saved_tf)
+                    _applied_saved = True
+            except (RuntimeError, AttributeError, TypeError):
                 pass
             self._saved_transform = None
-        else:
+        if not _applied_saved:
             self.view.fitInView(self.pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
-            # deferred fit — widget may not be shown yet
+            self.view._is_fitted = True
             QTimer.singleShot(0, self._fit_current)
             QTimer.singleShot(50, self._fit_current)
         self.view.setFocus()
         self.lbl_title.setText(os.path.basename(fp))
         self.lbl_counter.setText(f"{self.current_index + 1} / {len(self.files)}")
 
+    # [PATCH-1.1-01e]
     def _fit_current(self):
-        # deferred fit helper — safe on deleted item / late timer
         if not self.pixmap_item:
             return
         try:
             self.view.fitInView(self.pixmap_item,
                                 Qt.AspectRatioMode.KeepAspectRatio)
+            self.view._is_fitted = True
         except RuntimeError:
             pass
 
+    # [PATCH-1.1-01f]
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self.pixmap_item:
-            # guard — pixmap_item C++ side may be gone
             try:
                 self.view.fitInView(self.pixmap_item,
                                     Qt.AspectRatioMode.KeepAspectRatio)
+                self.view._is_fitted = True
             except RuntimeError:
                 self.pixmap_item = None
 
@@ -3793,28 +4445,72 @@ class ImageViewer(QWidget):
         if hasattr(_mw, "_guard_scan") and _mw._guard_scan():
             return
         fp = self.files[self.current_index]
+        if os.path.islink(fp):
+            QMessageBox.warning(self, t("error_title"),
+                                t("error_rotate_symlink"))
+            return
+        # [PATCH-1.1-FIX15-H2] reentrancy guard. Previous click in
+        # progress? Ignore — prevents two overlapping HEIC encodes
+        # and duplicate refusal/save dialogs.
+        if getattr(self, "_rotating", False):
+            return
+        self._rotating = True
         self.scene_.clear()
         self.pixmap_item = None
+        # [PATCH-1.1-FIX14] busy cursor removed — it made HEIC
+        # rotate feel slower (perceived freeze). v1.0 behavior:
+        # no cursor change, operation just blocks normally. Wall-
+        # clock time is UNCHANGED (fix12 optimizations kept).
+        # [PATCH-1.1-FIX15-H1] status BEFORE Image.open — HEIC
+        # decode/header read can take 100-300ms; without feedback the
+        # window looks frozen even on the refusal path (multi-frame).
+        try:
+            _sb0 = _mw.statusBar() if _mw else None
+            if _sb0:
+                _sb0.showMessage(t("status_rotating_check"), 0)
+                QApplication.processEvents(
+                    QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        except Exception:
+            pass
         try:
             st = os.stat(fp)
             ext = os.path.splitext(fp)[1].lower()
-            # capture EXIF before rotation; reset Orientation only
+            # [PATCH-1.1-FIX12] Merge EXIF read into single open —
+            # saves one full HEIC decode (~200-500ms per rotate).
+            # Sub-IFD materialized while file is still open —
+            # get_ifd() needs img.fp.
             _orig_exif = None
-            try:
-                with Image.open(fp) as _src:
-                    _orig_exif = _src.getexif()
-            except Exception:
-                _orig_exif = None
+            _orig_sub_ifd = None
+            _rotated_pixmap = None
             with Image.open(fp) as img:
-                # NB-85: refuse multi-frame TIFF/HEIC. Saving only the
-                # first frame via temp+os.replace irrecoverably destroys
-                # remaining pages (real data-loss for scanned documents,
-                # burst HEIC, fax TIFFs).
                 _nframes = getattr(img, "n_frames", 1)
                 if _nframes > 1:
-                    raise RuntimeError(
-                        f"Cannot rotate multi-frame {ext} "
-                        f"({_nframes} frames) safely")
+                    # [PATCH-1.1-FIX15-H2] dedicated exception — the
+                    # message is already user-complete; do NOT wrap in
+                    # "Could not rotate: <err>".
+                    raise _RotateRefusedError(t(
+                        "error_rotate_multiframe",
+                        ext=ext, n=_nframes))
+                try:
+                    _e_obj = img.getexif()
+                    _orig_exif = {}
+                    for _k, _v in _e_obj.items():
+                        if _k == 0x8769:
+                            continue
+                        if _k == 0x0112:
+                            _orig_exif[_k] = 1
+                        else:
+                            _orig_exif[_k] = _v
+                    try:
+                        _sub = _e_obj.get_ifd(0x8769)
+                        if _sub:
+                            _orig_sub_ifd = dict(_sub)
+                    except Exception:
+                        _orig_sub_ifd = None
+                except Exception:
+                    _orig_exif = None
+                    _orig_sub_ifd = None
+                _icc_profile = img.info.get("icc_profile")
                 img = ImageOps.exif_transpose(img)
                 rotated = img.rotate(angle, expand=True)
 
@@ -3834,7 +4530,7 @@ class ImageViewer(QWidget):
                 elif ext in (".heic", ".heif"):
                     # never silently convert HEIC to JPEG — data loss
                     if not HEIF_SUPPORT:
-                        raise RuntimeError(t("heic_unavailable"))
+                        raise _RotateRefusedError(t("heic_unavailable"))
                     save_format = "HEIF"
                     to_save = rotated
                     save_kwargs = {}
@@ -3850,7 +4546,15 @@ class ImageViewer(QWidget):
                             int(p) for p in _ph.__version__.split(".")[:2]
                         )
                         if _ph_ver >= (0, 11):
-                            save_kwargs["quality"] = 95
+                            # [PATCH-1.1-FIX14] 95 -> 90: ~20% faster
+                            # HEVC encode. Quality difference is
+                            # imperceptible for photos (HEVC is very
+                            # efficient at high quality levels).
+                            save_kwargs["quality"] = 90
+                        else:
+                            logger.warning(
+                                f"pillow-heif {_ph.__version__} < 0.11: "
+                                f"HEIC rotate may degrade quality")
                     except Exception:
                         pass
                 elif ext == ".bmp":
@@ -3867,44 +4571,60 @@ class ImageViewer(QWidget):
                     save_kwargs = {"quality": 95}
 
             # reattach EXIF with Orientation reset; preserve Exif sub-IFD
-            # (DateTimeOriginal 36867 lives in 0x8769, not IFD0)
+            # [PATCH-1.1-FIX12] uses pre-materialized _orig_sub_ifd
             if save_format in ("JPEG", "WEBP", "TIFF", "HEIF"):
                 try:
                     _exif = Image.Exif()
                     if _orig_exif:
-                        # copy IFD0 tags
                         for _k, _v in _orig_exif.items():
-                            if _k == 0x8769:
-                                continue  # handled below
-                            if _k == 0x0112:
-                                _exif[_k] = 1
-                            else:
-                                _exif[_k] = _v
-                        # copy Exif sub-IFD (dates, exposure, etc.)
-                        # cast to dict for Pillow <9.2 compat;
-                        # without this some Pillow versions silently drop
-                        # DateTimeOriginal (regression from patch 10).
-                        try:
-                            _sub = _orig_exif.get_ifd(0x8769)
-                            if _sub:
-                                try:
-                                    _exif[0x8769] = dict(_sub)
-                                except (TypeError, AttributeError):
-                                    logger.warning(
-                                        "rotate: Pillow too old to write "
-                                        "Exif sub-IFD — DateTimeOriginal "
-                                        "may be lost on this file")
-                        except Exception as _e:
-                            logger.warning(
-                                f"rotate: sub-ifd read failed: {_e}")
+                            _exif[_k] = _v
+                        if _orig_sub_ifd:
+                            try:
+                                _exif[0x8769] = _orig_sub_ifd
+                            except Exception as _e:
+                                logger.warning(
+                                    f"rotate: sub-ifd write failed: {_e}")
                         if 0x0112 not in _exif:
                             _exif[0x0112] = 1
                     else:
                         _exif[0x0112] = 1
                     save_kwargs["exif"] = _exif.tobytes()
+                    if _icc_profile:
+                        save_kwargs["icc_profile"] = _icc_profile
                 except Exception as _e:
                     logger.debug(f"rotate: exif reattach failed: {_e}")
 
+            # [PATCH-1.1-FIX12] Build pixmap from in-memory rotated
+            # image — lets update_view() skip full re-read
+            # (major HEIC rotate win).
+            try:
+                _pv = rotated if rotated.mode == "RGB" else rotated.convert("RGB")
+                _pdata = _pv.tobytes("raw", "RGB")
+                _qimg = QImage(_pdata, _pv.width, _pv.height, _pv.width * 3,
+                               QImage.Format.Format_RGB888).copy()
+                _rotated_pixmap = QPixmap.fromImage(_qimg)
+            except Exception as _e:
+                logger.debug(f"rotate: pixmap build failed: {_e}")
+                _rotated_pixmap = None
+
+            # [PATCH-1.1-FIX14] status feedback during slow encode
+            # [PATCH-1.1-FIX15-H3] also show indeterminate progress
+            # bar — HEIC encode (E9, 300-700ms) otherwise looks like
+            # a frozen window. processEvents() draws the bar before
+            # we block on encode. Hidden in the finally block below.
+            try:
+                _mw_sb = self.window().statusBar()
+                if _mw_sb:
+                    _mw_sb.showMessage(t("status_rotating_save"), 0)
+                _mw_pb = getattr(self.window(), "progress_bar", None)
+                if _mw_pb is not None:
+                    _mw_pb.setRange(0, 0)
+                    _mw_pb.setFormat("")
+                    _mw_pb.show()
+                QApplication.processEvents(
+                    QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+            except Exception:
+                pass
             dir_name = os.path.dirname(fp) or "."  # empty dir -> CWD
             fd, temp_path = tempfile.mkstemp(suffix=ext, dir=dir_name)
             os.close(fd)
@@ -3954,11 +4674,52 @@ class ImageViewer(QWidget):
                             pass
             except Exception:
                 pass
+            try:
+                _mw_sb = self.window().statusBar()
+                if _mw_sb:
+                    _mw_sb.clearMessage()
+            except Exception:
+                pass
             self.file_rotated.emit(fp)
+            # [PATCH-1.1-FIX12] use in-memory pixmap — skip full re-read
+            if _rotated_pixmap is not None and not _rotated_pixmap.isNull():
+                self.update_view(preloaded_pixmap=_rotated_pixmap)
+            else:
+                self.update_view()
+        except _RotateRefusedError as _rre:
+            # [PATCH-1.1-FIX15-H2] refusal message is already complete
+            # and localized — do NOT prepend "Could not rotate:".
+            try:
+                _mw_sb = self.window().statusBar()
+                if _mw_sb:
+                    _mw_sb.clearMessage()
+            except Exception:
+                pass
+            QMessageBox.warning(self, t("error_title"), str(_rre))
             self.update_view()
         except Exception as e:
+            try:
+                _mw_sb = self.window().statusBar()
+                if _mw_sb:
+                    _mw_sb.clearMessage()
+            except Exception:
+                pass
             QMessageBox.warning(self, t("error_title"), t("error_rotate", err=str(e)))
             self.update_view()
+        finally:
+            # [PATCH-1.1-FIX15-H2] release reentrancy guard
+            self._rotating = False
+            # [PATCH-1.1-FIX15-H3] hide rotate progress bar on any
+            # exit (success, refusal, exception). Restore range/format
+            # so the shared progress_bar is reusable by scan/delete.
+            try:
+                _pb = getattr(self.window(), "progress_bar", None)
+                if _pb is not None:
+                    _pb.hide()
+                    _pb.setRange(0, 100)
+                    _pb.setFormat("%v / %m")
+            except Exception:
+                pass
 
     def delete_current(self):
         if not (0 <= self.current_index < len(self.files)):
@@ -4022,25 +4783,77 @@ class ImageViewer(QWidget):
         self.lbl_title.setText(f"{t('btn_copy')}: {os.path.basename(fp)}")
         self.copy_to_clipboard.emit(fp)  # sync internal clipboard
 
+    # [PATCH-1.1-01b]
     def next_image(self):
         if self.current_index < len(self.files) - 1:
-            # NB-24: snapshot transform before swap
             try:
-                self._saved_transform = self.view.transform()
-            except RuntimeError:
+                _old_aspect = 0.0
+                if self.pixmap_item is not None:
+                    _pm = self.pixmap_item.pixmap()
+                    if not _pm.isNull() and _pm.height() > 0:
+                        _old_aspect = _pm.width() / _pm.height()
+                self._saved_transform = (self.view.transform(), _old_aspect)
+            except (RuntimeError, AttributeError):
                 self._saved_transform = None
             self.current_index += 1
             self.update_view()
 
+    # [PATCH-1.1-01c]
     def prev_image(self):
         if self.current_index > 0:
-            # NB-24: snapshot transform before swap
             try:
-                self._saved_transform = self.view.transform()
-            except RuntimeError:
+                _old_aspect = 0.0
+                if self.pixmap_item is not None:
+                    _pm = self.pixmap_item.pixmap()
+                    if not _pm.isNull() and _pm.height() > 0:
+                        _old_aspect = _pm.width() / _pm.height()
+                self._saved_transform = (self.view.transform(), _old_aspect)
+            except (RuntimeError, AttributeError):
                 self._saved_transform = None
             self.current_index -= 1
             self.update_view()
+
+
+# [PATCH-1.1-FIX4-05a]
+# ============================================================
+#                     RESORT PROGRESS DIALOG
+# ============================================================
+class ResortProgressDialog(QDialog):
+    def __init__(self, total, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Applying priority")
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        # [PATCH-1.1-FIX9-10] bigger dialog + larger text/bar
+        self.setFixedSize(480, 160)
+        self.setWindowFlags(
+            self.windowFlags() & ~Qt.WindowType.WindowCloseButtonHint
+            & ~Qt.WindowType.WindowContextHelpButtonHint
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
+        lbl = QLabel("Please wait while files are re-sorted...")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setStyleSheet("font-size: 14px;")
+        layout.addWidget(lbl)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, total)
+        self.bar.setFormat("%v / %m")
+        self.bar.setTextVisible(True)
+        # local override: taller bar + larger font, so %-numbers stay
+        # legible even when the chunk fills the whole widget.
+        self.bar.setStyleSheet(
+            "QProgressBar { font-size: 14px; font-weight: bold; "
+            "min-height: 28px; max-height: 30px; border-radius: 8px; } "
+            "QProgressBar::chunk { border-radius: 7px; }")
+        layout.addWidget(self.bar)
+    def set_progress(self, cur, total):
+        try:
+            if total > 0 and self.bar.maximum() != total:
+                self.bar.setRange(0, total)
+            self.bar.setValue(cur)
+        except RuntimeError:
+            pass
 
 
 # ============================================================
@@ -4142,7 +4955,11 @@ class SettingsWidget(QWidget):
     language_load_requested = Signal()
     language_export_requested = Signal()
     language_reset_requested = Signal()
+    # [PATCH-1.1-06a]
     calendar_export_requested = Signal()
+    # [PATCH-1.1-FIX2-05a]
+    events_export_requested = Signal()
+    events_import_requested = Signal()
     calendar_import_requested = Signal()
     data_find_missing_requested = Signal()  # 
     data_restore_backup_requested = Signal()  # 
@@ -4311,7 +5128,16 @@ class SettingsWidget(QWidget):
         sm.addWidget(self.spin_safe_media)
         sm.addWidget(QLabel(t("settings_safe_media_files")))
         sm.addStretch()
+        # [PATCH-1.1-08b]
         vb.addLayout(sm)
+
+        # [PATCH-1.1-FIX2-06b]
+        # [PATCH-1.1-FIX3-E1]
+        _bg = cache_config.get("bg_thumb_gen", False)
+        self.chk_bg_thumbs = QCheckBox(t("settings_bg_previews"))
+        self.chk_bg_thumbs.setChecked(_bg is True)
+        self.chk_bg_thumbs.toggled.connect(self.emit_cache_settings)
+        vb.addWidget(self.chk_bg_thumbs)
 
         tl = QHBoxLayout()
         tl.addWidget(QLabel(t("settings_theme")))
@@ -4362,13 +5188,21 @@ class SettingsWidget(QWidget):
         hint.setStyleSheet(f"color: {COLOR_MUTED};")
         hint.setWordWrap(True)
         sb.addWidget(hint)
+        # [PATCH-1.1-06b]
         sb_row = QHBoxLayout()
         btn_exp_cal = QPushButton(t("settings_share_export"))
         btn_exp_cal.clicked.connect(self.calendar_export_requested.emit)
         btn_imp_cal = QPushButton(t("settings_share_import"))
         btn_imp_cal.clicked.connect(self.calendar_import_requested.emit)
+        # [PATCH-1.1-FIX2-05b]
+        btn_exp_ev = QPushButton(t("settings_export_events"))
+        btn_exp_ev.clicked.connect(self.events_export_requested.emit)
+        btn_imp_ev = QPushButton(t("settings_import_events"))
+        btn_imp_ev.clicked.connect(self.events_import_requested.emit)
         sb_row.addWidget(btn_exp_cal)
         sb_row.addWidget(btn_imp_cal)
+        sb_row.addWidget(btn_exp_ev)
+        sb_row.addWidget(btn_imp_ev)
         sb_row.addStretch()
         sb.addLayout(sb_row)
 
@@ -4414,6 +5248,7 @@ class SettingsWidget(QWidget):
         _tr.addWidget(self.spin_trash_days)
         _tr.addStretch()
         db.addLayout(_tr)
+        # [PATCH-1.1-FIX3-E2]
         db_row = QHBoxLayout()
         btn_find = QPushButton(t("settings_find_missing"))
         btn_find.clicked.connect(self.data_find_missing_requested.emit)
@@ -4423,6 +5258,12 @@ class SettingsWidget(QWidget):
         db_row.addWidget(btn_restore)
         db_row.addStretch()
         db.addLayout(db_row)
+        
+        _ask_relink = cache_config.get("ask_relink_on_startup", True)
+        self.chk_ask_relink = QCheckBox(t("settings_ask_relink"))
+        self.chk_ask_relink.setChecked(_ask_relink is not False)
+        self.chk_ask_relink.toggled.connect(self.emit_cache_settings)
+        db.addWidget(self.chk_ask_relink)
 
         # ---- hotkey editor box
         self.hk_box = QFrame()
@@ -4585,7 +5426,7 @@ class SettingsWidget(QWidget):
             # NB-102: reject formats with no Y/M/D tokens. Previously
             # "ABC" compiled to a literal regex that never matched —
             # user saw 0 files with no diagnostic.
-            if not any(_c in fmt for _c in ("Y", "M", "D")):
+            if not all(_c in fmt for _c in ("Y", "M", "D")):
                 msg_warning(self, t("error_title"),
                             t("error_invalid_format"))
                 return
@@ -4607,7 +5448,7 @@ class SettingsWidget(QWidget):
         action (via _resolved_hotkey of current config), confirm
         before applying. Cancel restores previous displayed value.
         """
-        portable = ks.toString()
+        portable = ks.toString(QKeySequence.SequenceFormat.PortableText)
         current = _resolved_hotkey(self._cache_cfg, action_id)
         if portable == current:
             return  # no-op (editingFinished fires on focus-out too)
@@ -4617,6 +5458,22 @@ class SettingsWidget(QWidget):
             # action on Esc — Qt shortcut contexts are disjoint
             # namespaces at runtime. Previously every action was
             # scanned regardless of ctx, producing false conflicts.
+            # [PATCH-1.1-FIX11-NB138] reserved shortcut check
+            if portable in RESERVED_SHORTCUTS:
+                _reply = QMessageBox.question(
+                    self, t("hk_section_title"),
+                    f"'{portable}' is reserved for the File menu. Assign anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    defaultButton=QMessageBox.StandardButton.No)
+                if _reply != QMessageBox.StandardButton.Yes:
+                    edt = self._hk_edits.get(action_id)
+                    if edt is not None:
+                        edt.blockSignals(True)
+                        edt.setKeySequence(
+                            QKeySequence(current) if current
+                            else QKeySequence())
+                        edt.blockSignals(False)
+                    return
             _my_ctx = HOTKEY_ACTIONS[action_id].get("ctx", "app")
             conflict_aid = None
             for other in HOTKEY_ACTIONS:
@@ -4731,7 +5588,11 @@ class SettingsWidget(QWidget):
             "safe_delete_threshold": self.spin_safe_delete.value(),    # 
             "trash_retention_days": self.spin_trash_days.value(),      # 
             "safe_media_add_enabled": self.chk_safe_media_add.isChecked(),    # 
-            "safe_media_add_threshold": self.spin_safe_media.value(),         # 
+            # [PATCH-1.1-08c]
+"safe_media_add_threshold": self.spin_safe_media.value(),         # 
+            # [PATCH-1.1-FIX2-06c]
+            "bg_thumb_gen": self.chk_bg_thumbs.isChecked(),
+            "ask_relink_on_startup": self.chk_ask_relink.isChecked(),
         })
 
     def change_cache_path(self):
@@ -4803,6 +5664,8 @@ class HelpWidget(QWidget):
             f"border: none; font-size: 15px; background-color: {COLOR_BG}; color: {COLOR_TEXT};")
         sections = [("help_import", "help_import_body"), ("help_views", "help_views_body"),
                     ("help_gallery", "help_gallery_body"), ("help_viewer", "help_viewer_body"),
+                    # [PATCH-1.1-FIX2-09c]
+                    ("help_events", "help_events_body"),
                     ("help_dups", "help_dups_body"), ("help_undo", "help_undo_body"),
                     ("help_themes", "help_themes_body")]
         html = f'<h1 style="color:{COLOR_TEXT};">{t("help_title")}</h1>'
@@ -4934,6 +5797,11 @@ def _dispatch_forward_text(op):
     fw = QApplication.focusWidget()
     if fw is None:
         return False
+    # [PATCH-1.1-FIX16-C1] QKeySequenceEdit is not a text widget, but
+    # ApplicationShortcut QActions swallow Ctrl+C/X/V/Del before they
+    # reach it. Return True to prevent file operations.
+    if isinstance(fw, QKeySequenceEdit):
+        return True
     if op == "copy" and isinstance(
             fw, (QLineEdit, QTextEdit, QPlainTextEdit, QTextBrowser)):
         try:
@@ -4969,6 +5837,11 @@ def _dispatch_forward_text(op):
             # platform_defaults override, or a user-rebound delete
             # to Backspace on Windows, the physically-pressed key
             # matches what we forward.
+            # [PATCH-1.1-FIX15-B5] init _seq before try; used below
+            # in the "ctrl" check. If activeWindow() is a modal (no
+            # .config) or None, previously NameError was silently
+            # caught by the outer try/except.
+            _seq = ""
             _key = None
             try:
                 _aw = QApplication.activeWindow()
@@ -4984,9 +5857,14 @@ def _dispatch_forward_text(op):
                 _key = (Qt.Key.Key_Backspace
                         if platform.system() == "Darwin"
                         else Qt.Key.Key_Delete)
+            _mods = Qt.KeyboardModifier.NoModifier
+            try:
+                if _seq:
+                    _mods = QKeySequence(_seq).keyboardModifiers()
+            except Exception:
+                pass
             _ev = QKeyEvent(
-                QEvent.Type.KeyPress, _key,
-                Qt.KeyboardModifier.NoModifier)
+                QEvent.Type.KeyPress, _key, _mods)
             QApplication.postEvent(fw, _ev)
         except Exception:
             pass
@@ -5090,8 +5968,13 @@ class MainWindow(QMainWindow):
             "safe_delete_threshold": 50,    # 
             "trash_dir": str(TRASH_DIR),    # 
             "trash_retention_days": 7,      # 
+            # [PATCH-1.1-08a]
             "safe_media_add_enabled": True,     # 
             "safe_media_add_threshold": 50,     # 
+            # [PATCH-1.1-FIX2-06a]
+            # [PATCH-1.1-FIX4-01]
+            "bg_thumb_gen": False,
+            "ask_relink_on_startup": True,
         }
         self.clipboard_files = []
         self.clipboard_action = None
@@ -5120,12 +6003,23 @@ class MainWindow(QMainWindow):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(500)
         self._save_timer.timeout.connect(self._do_save_json)
+        # [PATCH-1.1-FIX16-C8] debounce save_config to avoid
+        # freezing on network drives when spinbox ticks rapidly.
+        self._save_config_timer = QTimer(self)
+        self._save_config_timer.setSingleShot(True)
+        self._save_config_timer.setInterval(500)
+        self._save_config_timer.timeout.connect(self.save_config)
         self._last_saved_count = -1  # cached count for save backup check
         # split counters so calendar and category losses trigger
         # backup independently (regression: merging both into one
         # total diluted the calendar-only threshold).
+        # [PATCH-1.1-FIX8-01]
         self._last_saved_cal_count = -1
         self._last_saved_cat_count = -1
+        self._bg_total = 0
+        self._bg_done = 0
+        self._bg_owns_progress = False  # [PATCH-1.1-FIX9]
+        self._bg_gen = 0  # [PATCH-1.1-FIX9b]
 
         self.load_config()
         self.config["undo_limit"] = self.undo_limit
@@ -5133,15 +6027,22 @@ class MainWindow(QMainWindow):
         # removed/renamed), silently fall back to the default; TRASH_DIR
         # stays as-is and the user sees a status message.
         _td = self.config.get("trash_dir")
-        if _td:
-            # rollback config on init failure. Otherwise the
-            # UI shows the old (invalid) path while TRASH_DIR is at
-            # default — user thinks trash is somewhere else.
-            if not set_trash_dir(_td):
-                logger.warning(
-                    f"configured trash_dir invalid: {_td!r}, "
-                    f"falling back to {TRASH_DIR}")
-                self.config["trash_dir"] = str(TRASH_DIR)
+        # [PATCH-1.1-FIX15-P2-8] sanitize None/empty/non-str — old
+        # `if _td:` skipped them, leaving None/"" in config that
+        # Settings then displayed and save_config persisted.
+        _td_ok = (isinstance(_td, str)
+                  and _td.strip() not in ("", ".")
+                  and Path(_td).is_absolute())
+        if not _td_ok:
+            logger.warning(
+                f"configured trash_dir invalid type/value: {_td!r}, "
+                f"using default {TRASH_DIR}")
+            self.config["trash_dir"] = str(TRASH_DIR)
+        elif not set_trash_dir(_td):
+            logger.warning(
+                f"configured trash_dir invalid: {_td!r}, "
+                f"falling back to {TRASH_DIR}")
+            self.config["trash_dir"] = str(TRASH_DIR)
         # (C2): sanitize theme. Corrupted config
         # with "theme": [] or {} crashes apply_theme --
         # "name not in THEMES" on unhashable raises TypeError
@@ -5155,8 +6056,15 @@ class MainWindow(QMainWindow):
         self.apply_styles()
         self.setup_shortcuts()
         self._build_menubar()
+        # [PATCH-1.1-FIX7-03]
         self.load_last_session()
+        # Defensive: previous session may have crashed with _busy=True
+        self._busy = False
+        self._scan_in_progress = False
+        # [PATCH-1.1-FIX2-07]
         QTimer.singleShot(2000, self.check_auto_clean)
+        if self.config.get("ask_relink_on_startup", True):
+            QTimer.singleShot(3000, self._check_startup_missing)
         self._update_undo_buttons()
         # beta marker on non-Windows platforms
         if BETA_PLATFORM:
@@ -5190,6 +6098,13 @@ class MainWindow(QMainWindow):
                     logger.warning(
                         f"load_config: cache is "
                         f"{type(_cache_cfg).__name__}, resetting")
+                    try:
+                        _corrupt_path = CONFIG_FILE.with_suffix(".json.corrupt")
+                        import shutil as _sh
+                        _sh.copy2(str(CONFIG_FILE), str(_corrupt_path))
+                        logger.warning(f"corrupt config saved: {_corrupt_path}")
+                    except Exception:
+                        pass
                     _cache_cfg = {}
                 self.config.update(_cache_cfg)
                 # (P0): cache_dir MUST be a non-empty absolute dir.
@@ -5261,17 +6176,29 @@ class MainWindow(QMainWindow):
                 if not isinstance(_hk, dict):
                     self.config["hotkeys"] = {}
                 else:
-                    self.config["hotkeys"] = {
-                        _k: _v for _k, _v in _hk.items()
-                        if isinstance(_k, str)
-                        and isinstance(_v, str)
-                    }
+                    # [PATCH-1.1-FIX15-P2-10] drop reserved shortcuts.
+                    # _on_hk_changed blocks them at assignment time,
+                    # but a hand-edited / legacy config.json could
+                    # still have undo=Ctrl+O and cause ambiguity.
+                    _filtered_hk = {}
+                    for _k, _v in _hk.items():
+                        if not isinstance(_k, str) or not isinstance(_v, str):
+                            continue
+                        if _v in RESERVED_SHORTCUTS:
+                            logger.warning(
+                                f"load_config: dropping reserved "
+                                f"shortcut {_v!r} for {_k!r}")
+                            continue
+                        _filtered_hk[_k] = _v
+                    self.config["hotkeys"] = _filtered_hk
                 _hp = self.config.get("hotkey_profile", "auto")
                 if _hp not in ("auto", "windows", "darwin", "linux"):
                     self.config["hotkey_profile"] = "auto"
                 for _bk in ("safe_delete_enabled",
                             "safe_media_add_enabled",
-                            "auto_clean_enabled"):
+                            "auto_clean_enabled",
+                            "bg_thumb_gen",
+                            "ask_relink_on_startup"):
                     _bv = self.config.get(_bk, True)
                     # NB-78: case-insensitive string check. "False" /
                     # "FALSE" / "No" / "Off" now correctly disable;
@@ -5423,9 +6350,16 @@ class MainWindow(QMainWindow):
         cal_tb.setContentsMargins(20, 10, 20, 10)
         cal_tb.setSpacing(10)
 
+        # [PATCH-1.1-10]
         self.btn_import = QPushButton(t("toolbar_add_folder"))
         self.btn_import.setObjectName("primary")
         self.btn_import.clicked.connect(self.import_folder)
+        self.btn_import.setToolTip(
+            "Scans all subfolders (unlimited depth).\n\n"
+            "Supported formats:\n"
+            "Photos: JPG, JPEG, PNG, HEIC, HEIF, WEBP, BMP, TIFF\n"
+            "Videos: MP4, MOV, AVI, MKV, WEBM"
+        )
 
         self.combo_view_mode = QComboBox()
         self.combo_view_mode.addItems([
@@ -5445,6 +6379,10 @@ class MainWindow(QMainWindow):
         self._last_view_index = _initial_vm
         self.combo_view_mode.currentIndexChanged.connect(self.change_view_mode)
 
+        # [PATCH-1.1-FIX2-08b]
+        self.btn_force_resort = QPushButton(t("btn_force_resort"))
+        self.btn_force_resort.clicked.connect(self.force_resort)
+        
         self.btn_rescan_dups = QPushButton(t("toolbar_rescan"))
         self.btn_rescan_dups.clicked.connect(self.force_rescan_dups)
         self.btn_rescan_dups.hide()
@@ -5458,7 +6396,9 @@ class MainWindow(QMainWindow):
         self.btn_paste.setEnabled(False)
 
         cal_tb.addWidget(self.btn_import)
+        # [PATCH-1.1-FIX2-08c]
         cal_tb.addWidget(self.combo_view_mode)
+        cal_tb.addWidget(self.btn_force_resort)
         cal_tb.addWidget(self.btn_rescan_dups)
         cal_tb.addWidget(self.btn_cancel_scan)
         cal_tb.addStretch()
@@ -5479,7 +6419,11 @@ class MainWindow(QMainWindow):
         self.settings_view.language_export_requested.connect(self.export_language_dialog)
         self.settings_view.language_reset_requested.connect(self.reset_language)
         self.settings_view.calendar_export_requested.connect(self.export_calendar)
+        # [PATCH-1.1-06c]
         self.settings_view.calendar_import_requested.connect(self.load_external_calendar)
+        # [PATCH-1.1-FIX2-05c]
+        self.settings_view.events_export_requested.connect(self.export_events_json)
+        self.settings_view.events_import_requested.connect(self.import_events_json)
         self.settings_view.data_find_missing_requested.connect(self.find_missing_files)
         self.settings_view.data_restore_backup_requested.connect(self.restore_from_backup)
         # hotkey editor signals
@@ -5502,6 +6446,8 @@ class MainWindow(QMainWindow):
         self.gallery_view.btn_delete.clicked.connect(self.delete_selected_files)
         self.gallery_view.btn_copy.clicked.connect(self.copy_selected_files)
         self.gallery_view.btn_cut.clicked.connect(self.cut_selected_files)
+        # [PATCH-1.1-07f]
+        self.gallery_view.export_media_requested.connect(self.export_event_media)
         self.gallery_view.files_moved_externally.connect(
             self._on_files_moved_externally)  # 
 
@@ -5550,6 +6496,16 @@ class MainWindow(QMainWindow):
         self.btn_rescan_dups.setText(t("toolbar_rescan"))
         self.btn_cancel_scan.setText(t("toolbar_cancel"))
         self.btn_paste.setText(t("toolbar_paste"))
+        try:
+            self.btn_force_resort.setText(t("btn_force_resort"))
+            self.btn_import.setToolTip(
+                "Scans all subfolders (unlimited depth).\n\n"
+                "Supported formats:\n"
+                "Photos: JPG, JPEG, PNG, HEIC, HEIF, WEBP, BMP, TIFF\n"
+                "Videos: MP4, MOV, AVI, MKV, WEBM"
+            )
+        except Exception:
+            pass
         idx = self.combo_view_mode.currentIndex()
         self.combo_view_mode.blockSignals(True)
         self.combo_view_mode.clear()
@@ -5600,9 +6556,74 @@ class MainWindow(QMainWindow):
                     self.open_gallery(self.current_gallery_context, mode)
         self._build_menubar()  # re-localize menubar
 
+    # [PATCH-1.1-FIX15-H4] language-rebuild progress dialog helpers.
+    # SettingsWidget + CalendarManagerWidget construction is
+    # synchronous in the UI thread (~200-500ms); without a visual
+    # indicator the window appears frozen after "load language".
+    def _start_lang_progress(self):
+        try:
+            dlg = QProgressDialog(
+                t("status_applying_language"), "", 0, 3, self)
+            dlg.setWindowTitle(t("app_title"))
+            dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+            dlg.setCancelButton(None)
+            dlg.setMinimumDuration(0)
+            dlg.setValue(0)
+            dlg.setWindowFlags(
+                dlg.windowFlags()
+                & ~Qt.WindowType.WindowCloseButtonHint
+                & ~Qt.WindowType.WindowContextHelpButtonHint)
+            dlg.setFixedSize(480, 140)
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+            QApplication.processEvents(
+                QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+            return dlg
+        except Exception:
+            logger.exception("_start_lang_progress failed")
+            return None
+
+    def _update_lang_progress(self, dlg, value, msg=None):
+        if dlg is None:
+            return
+        try:
+            if msg:
+                dlg.setLabelText(msg)
+            dlg.setValue(value)
+            QApplication.processEvents(
+                QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        except Exception:
+            pass
+
+    def _end_lang_progress(self, dlg):
+        if dlg is None:
+            return
+        try:
+            dlg.setValue(dlg.maximum())
+            QApplication.processEvents(
+                QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        except Exception:
+            pass
+        try:
+            dlg.close()
+            dlg.deleteLater()
+        except Exception:
+            pass
+
     def _rebuild_translatable_widgets(self):
         """Recreate Settings and Manager widgets so all labels re-localize."""
         saved_idx = self.stack.currentIndex()
+        # [PATCH-1.1-FIX15-B6] also capture widget — if the NB-27 insert
+        # fallback shifts indices, setCurrentIndex would restore the
+        # WRONG widget. Preferred path below: setCurrentWidget.
+        saved_widget = self.stack.currentWidget()
+
+        # [PATCH-1.1-FIX15-H4] show centered modal progress during
+        # the two synchronous widget reconstructions below.
+        _h4_dlg = self._start_lang_progress()
+        self._update_lang_progress(
+            _h4_dlg, 1, t("status_rebuilding_settings"))
 
         idx = self.stack.indexOf(self.settings_view)
         if idx >= 0:
@@ -5617,7 +6638,18 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             pass
         self.settings_view.deleteLater()
-        self.settings_view = SettingsWidget(self.priority, self.config)
+        # [PATCH-1.1-FIX16-C6] close lang dialog on construction
+        # failure (else modal stays up forever).
+        try:
+            _new_settings_widget = SettingsWidget(self.priority, self.config)
+        except Exception:
+            self._end_lang_progress(_h4_dlg)
+            raise
+        self.settings_view = _new_settings_widget
+        # [PATCH-1.1-FIX15-H4] Settings construction is the heaviest
+        # single step — signal progress before wiring signals.
+        self._update_lang_progress(
+            _h4_dlg, 2, t("status_rebuilding_manager"))
         self.settings_view.priorities_changed.connect(self.update_priority)
         self.settings_view.cache_settings_changed.connect(self.on_cache_settings_changed)
         self.settings_view.language_load_requested.connect(self.load_language_dialog)
@@ -5625,6 +6657,8 @@ class MainWindow(QMainWindow):
         self.settings_view.language_reset_requested.connect(self.reset_language)
         self.settings_view.calendar_export_requested.connect(self.export_calendar)
         self.settings_view.calendar_import_requested.connect(self.load_external_calendar)
+        self.settings_view.events_export_requested.connect(self.export_events_json)
+        self.settings_view.events_import_requested.connect(self.import_events_json)
         self.settings_view.data_find_missing_requested.connect(self.find_missing_files)
         self.settings_view.data_restore_backup_requested.connect(self.restore_from_backup)
         # hotkey editor signals (must re-connect on every rebuild)
@@ -5663,7 +6697,18 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             pass
         self.manager_view.deleteLater()
-        self.manager_view = CalendarManagerWidget(self)
+        # [PATCH-1.1-FIX16-C6] close lang dialog on construction
+        # failure (else modal stays up forever).
+        try:
+            _new_manager_widget = CalendarManagerWidget(self)
+        except Exception:
+            self._end_lang_progress(_h4_dlg)
+            raise
+        self.manager_view = _new_manager_widget
+        # [PATCH-1.1-FIX15-H4] final heavy step done — signal + will
+        # close after update_combo below.
+        self._update_lang_progress(
+            _h4_dlg, 3, t("status_finalizing"))
         if idx >= 0:
             self.stack.insertWidget(idx, self.manager_view)
         else:
@@ -5683,7 +6728,20 @@ class MainWindow(QMainWindow):
                 f"re-inserted before settings_view (idx={_anchor})")
         self.manager_view.update_combo(self.calendars, self.current_cal_name)
 
-        self.stack.setCurrentIndex(saved_idx)
+        # [PATCH-1.1-FIX15-H4] end language progress dialog
+        self._end_lang_progress(_h4_dlg)
+        _h4_dlg = None
+
+        # [PATCH-1.1-FIX15-B6] prefer saved_widget; fall back to index
+        # when saved_widget was the settings/manager widget (which
+        # got replaced and is no longer in the stack).
+        try:
+            if saved_widget is not None and self.stack.indexOf(saved_widget) >= 0:
+                self.stack.setCurrentWidget(saved_widget)
+            else:
+                self.stack.setCurrentIndex(saved_idx)
+        except Exception:
+            self.stack.setCurrentIndex(saved_idx)
 
     def apply_styles(self):
         # NB-73: derive CSS font-family from FONT_FAMILY (platform
@@ -5737,8 +6795,8 @@ class MainWindow(QMainWindow):
             QComboBox QAbstractItemView {{ color: {COLOR_TEXT}; background-color: {COLOR_SURFACE}; border: 1px solid {COLOR_PRIMARY}; border-radius: 6px; padding: 4px; selection-background-color: {COLOR_PRIMARY_LT}; selection-color: {COLOR_TEXT}; }}
 
             QLabel {{ color: {COLOR_TEXT}; }}
-            QProgressBar {{ border: 1px solid {COLOR_BORDER}; border-radius: 6px; text-align: center; background-color: {COLOR_SURFACE}; min-height: 18px; max-height: 20px; color: {COLOR_TEXT}; font-size: 11px; }}
-            QProgressBar::chunk {{ background-color: {COLOR_PRIMARY}; border-radius: 5px; }}
+            QProgressBar {{ border: 1px solid {COLOR_BORDER}; border-radius: 6px; text-align: center; background-color: {COLOR_SURFACE}; min-height: 18px; max-height: 20px; color: {COLOR_PROGRESS_TEXT}; font-size: 11px; font-weight: 600; }}
+            QProgressBar::chunk {{ background-color: {COLOR_PROGRESS_CHUNK}; border-radius: 5px; }}
 
             QMenu {{ background-color: {COLOR_SURFACE}; border: 1px solid {COLOR_BORDER}; border-radius: 8px; padding: 4px; }}
             QMenu::item {{ padding: 8px 20px; border-radius: 4px; color: {COLOR_TEXT}; }}
@@ -5768,7 +6826,7 @@ class MainWindow(QMainWindow):
             # Defensive: setup_shortcuts not yet called. Not expected.
             return
         self.config.setdefault("hotkeys", {})[action_id] = seq
-        self.save_config()
+        self._save_config_timer.start()
         self.rebind_hotkeys()
 
     def on_hotkey_profile_changed(self, profile):
@@ -5780,7 +6838,7 @@ class MainWindow(QMainWindow):
         if profile not in ("auto", "windows", "darwin", "linux"):
             return
         self.config["hotkey_profile"] = profile
-        self.save_config()
+        self._save_config_timer.start()
         self.rebind_hotkeys()
         # Refresh Settings QKeySequenceEdit values from resolved config.
         # The SettingsWidget itself does NOT rebuild (priority-sync
@@ -5801,7 +6859,7 @@ class MainWindow(QMainWindow):
         """
         self.config.pop("hotkeys", None)
         self.config["hotkey_profile"] = "auto"
-        self.save_config()
+        self._save_config_timer.start()
         self.rebind_hotkeys()
 
     def on_cache_settings_changed(self, new_settings):
@@ -5899,7 +6957,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
         self.config.update(new_settings)
-        self.save_config()
+        self._save_config_timer.start()
 
         needs_dup_refresh = False
         theme_changed = "theme" in new_settings and new_settings["theme"] != old_theme
@@ -5925,10 +6983,25 @@ class MainWindow(QMainWindow):
             if self.stack.currentIndex() == 4 and self.gallery_view.is_dups_mode:
                 needs_dup_refresh = True
 
+        # [PATCH-1.1-FIX8-05]
         if needs_dup_refresh and self.last_dups_groups:
             cols = int(self.config.get("dups_per_row", 2))
             self.gallery_view.dup_gallery.set_groups(
                 self.last_dups_groups, self.config["cache_dir"], cols)
+
+        # [PATCH-1.1-FIX9b] toggle handling via _reset_bg_progress
+        if "bg_thumb_gen" in new_settings:
+            try:
+                self._reset_bg_progress()
+                if new_settings["bg_thumb_gen"]:
+                    # bg enabled -- fresh state, kick off loading
+                    self.calendar_view._schedule()
+                    self.gallery_view.list_widget._schedule()
+                    # [PATCH-1.1-FIX9e] If in gallery, restart the counter
+                    if self.stack.currentIndex() == 4 and not self.gallery_view.is_dups_mode:
+                        self.gallery_view._start_preview_count(self.gallery_view.raw_grouped_data)
+            except Exception:
+                logger.exception("on_cache_settings_changed: bg toggle")
 
     # ---- language
     def load_language_dialog(self):
@@ -5960,9 +7033,79 @@ class MainWindow(QMainWindow):
         tr.reset_to_default()
         self.settings_view.update_language_label()
         self.config.pop("language_file", None)
-        self.save_config()
+        self._save_config_timer.start()
 
     # ---- scan guards / dialog
+    # [PATCH-1.1-FIX2-07b]
+    # [PATCH-1.1-FIX3-C]
+    def _check_startup_missing(self):
+        if getattr(self, "_busy", False) or getattr(self, "_scan_in_progress", False):
+            return
+        if not self.config.get("ask_relink_on_startup", True):
+            return
+        # Only check CURRENT calendar, not all
+        _missing = 0
+        _current_cal = self.calendars.get(self.current_cal_name, {})
+        for files in _current_cal.values():
+            for f in files:
+                if os.path.exists(f):
+                    continue
+                _p = os.path.dirname(f) or "."
+                try:
+                    _p_ok = (os.path.isdir(_p) and os.access(_p, os.R_OK))
+                except OSError:
+                    _p_ok = False
+                if _p_ok:
+                    _missing += 1
+                    break
+            if _missing: break
+        if _missing > 0:
+            _reply = QMessageBox.question(
+                self, t("title_missing_detected"),
+                t("confirm_missing_detected", name=self.current_cal_name),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                defaultButton=QMessageBox.StandardButton.Yes)
+            if _reply == QMessageBox.StandardButton.Yes:
+                self.find_missing_files()
+
+    # [PATCH-1.1-FIX7-06]
+    # [PATCH-1.1-FIX8-04]
+    # [PATCH-1.1-FIX8C-04]
+    def _update_bg_progress(self):
+        if getattr(self, "_busy", False) or getattr(self, "_scan_in_progress", False):
+            return
+        if not self.config.get("bg_thumb_gen", False):
+            if self._bg_owns_progress:
+                self._bg_owns_progress = False
+                self.progress_bar.hide()
+                self.progress_bar.setRange(0, 100)
+                self.progress_bar.setFormat("%v / %m")
+            return
+
+        # Gallery mode: determinate, precomputed total
+        if self.stack.currentIndex() == 4:
+            # handled by GalleryListWidget._on_thumb
+            return
+
+        # Calendar mode: indeterminate, just show activity
+        _pending = getattr(self.calendar_view, "_bg_pending", 0)
+        if _pending > 0:
+            if not self._bg_owns_progress:
+                self._bg_owns_progress = True
+                self.progress_bar.show()
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setFormat("")
+            self.statusBar().showMessage(
+                t("status_bg_generated", n=self._bg_done))
+        else:
+            if self._bg_owns_progress:
+                self._bg_owns_progress = False
+                self.progress_bar.hide()
+                self.progress_bar.setRange(0, 100)
+                self.progress_bar.setFormat("%v / %m")
+                self.statusBar().showMessage(
+                    t("status_bg_complete"), 3000)
+
     def _guard_scan(self):
         """return True if a scan is in progress (caller aborts).
         Used by all destructive ops — during a scan _busy must stay
@@ -6025,6 +7168,56 @@ class MainWindow(QMainWindow):
         """called from every scan_finished / cancel_scan exit path."""
         self._close_scan_dialog()
         self._scan_in_progress = False
+
+    def _reset_bg_progress(self):
+        """[PATCH-1.1-FIX9b] Reset background generation state.
+        Called when the calendar/view changes, or when the bg thumb
+        checkbox is toggled. Increments _bg_gen so stale tasks
+        completing in the background are ignored safely."""
+        self._bg_gen += 1
+        self._bg_done = 0
+        self._bg_total = 0
+        self._bg_owns_progress = False
+        # stop any active preview counter
+        if hasattr(self, 'gallery_view') and self.gallery_view:
+            pc = getattr(self.gallery_view, '_preview_counter', None)
+            if pc is not None:
+                if pc.isRunning():
+                    pc.stop()
+                self.gallery_view._preview_counter = None
+        if hasattr(self, 'calendar_view') and self.calendar_view:
+            self.calendar_view._bg_pending = 0
+            self.calendar_view._bg_pool.clear()
+        if hasattr(self, 'gallery_view') and self.gallery_view and hasattr(self.gallery_view, 'list_widget') and self.gallery_view.list_widget:
+            self.gallery_view.list_widget._bg_pending = 0
+            self.gallery_view.list_widget._bg_pool.clear()
+        
+        if not self.config.get("bg_thumb_gen", False):
+            self.progress_bar.hide()
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setFormat("%v / %m")
+        else:
+            self._update_bg_progress()
+
+    def _flush_bg_queue(self):
+        """[PATCH-1.1-FIX9c] Soft flush of queued background tasks.
+        Drops queued tasks without resetting the overall counters,
+        so the progress bar doesn't restart from 0 when switching views.
+        Running tasks are left to finish gracefully."""
+        if not self.config.get("bg_thumb_gen", False):
+            return
+        try:
+            for obj in (self.calendar_view, self.gallery_view.list_widget):
+                pool = obj._bg_pool
+                active = pool.activeThreadCount()
+                queued = obj._bg_pending - active
+                if queued > 0:
+                    pool.clear()
+                    obj._bg_pending -= queued
+                    # don't decrement _bg_total -- it's precomputed
+            self._update_bg_progress()
+        except Exception:
+            logger.exception("_flush_bg_queue failed")
 
     # ---- undo / redo
     def _update_undo_buttons(self):
@@ -6609,6 +7802,7 @@ class MainWindow(QMainWindow):
             self.progress_bar.show()
             # capture dup cal 
             self._dup_cal_name = self.current_cal_name
+            self._dup_cal_id = id(self.calendars.get(self.current_cal_name))
             self.dup_thread = DuplicateScanThread(filepaths)
             _thread = self.dup_thread
             self.dup_thread.progress.connect(self.update_progress)
@@ -6645,10 +7839,21 @@ class MainWindow(QMainWindow):
         # current one — user could then delete non-duplicate files via
         # "Delete duplicates".
         orig_cal = getattr(self, "_dup_cal_name", None)
+        _exp_id = getattr(self, "_dup_cal_id", None)
         if orig_cal and orig_cal not in self.calendars:
             logger.info(
                 f"on_duplicates_found: calendar {orig_cal!r} no longer exists, "
                 f"discarding results")
+            self._dup_cal_name = None
+            self.progress_bar.hide()
+            self.progress_bar.setRange(0, 100)
+            return
+        # [PATCH-1.1-FIX11-NB136] identity check
+        if (_exp_id is not None and orig_cal
+                and id(self.calendars.get(orig_cal)) != _exp_id):
+            logger.info(
+                f"on_duplicates_found: calendar {orig_cal!r} was recreated "
+                f"during scan; discarding results")
             self._dup_cal_name = None
             self.progress_bar.hide()
             self.progress_bar.setRange(0, 100)
@@ -6691,10 +7896,14 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(t("info_dups_found", n=len(dups)), 5000)
 
     def open_duplicates_gallery(self):
-        self._last_view_index = 4
+        # [PATCH-1.1-FIX15-A8] set _last_view_index=4 AFTER the empty
+        # check — otherwise combo claimed "Duplicates" while view
+        # stayed on Days.
         groups = []
         if not self.last_dups:
+            self.current_gallery_context = None
             return
+        self._last_view_index = 4
         for i, (h, files) in enumerate(self.last_dups.items()):
             existing = [f for f in files if os.path.exists(f)]
             if len(existing) > 1:
@@ -6703,6 +7912,13 @@ class MainWindow(QMainWindow):
             # reset state so combo doesn't stay on "Duplicates"
             self.last_dups = None
             self.last_dups_groups = []
+            # [PATCH-1.1-FIX15-A8] clear self.duplicates[cal] — no
+            # groups means no ⚠️ markers; keeps open_gallery fallback
+            # clean after offline filter.
+            try:
+                self.duplicates[self.current_cal_name] = set()
+            except Exception:
+                pass
             self._last_view_index = 0
             self.combo_view_mode.blockSignals(True)
             self.combo_view_mode.setCurrentIndex(0)
@@ -6806,9 +8022,9 @@ class MainWindow(QMainWindow):
         failed = 0
         successful = []
         for i, fp in enumerate(to_delete):
-            self.gallery_view.list_widget.remove_item_by_filepath(fp)
             success, tp, err = move_to_trash(fp)
             if success:
+                self.gallery_view.list_widget.remove_item_by_filepath(fp)
                 if tp:
                     trashed.append((tp, fp))
                 successful.append(fp)
@@ -7006,12 +8222,25 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         mb = self.menuBar()
+        # [PATCH-1.1-FIX15-P2-5] mb.clear() detaches actions but the
+        # QMenu objects (File/Edit/…) stay parented to menuBar.
+        # On every retranslate that leaks ~4 QMenu instances.
+        for _act in list(mb.actions()):
+            try:
+                _sub = _act.menu()
+                if _sub is not None:
+                    _sub.setParent(None)
+                    _sub.deleteLater()
+            except RuntimeError:
+                pass
         mb.clear()
 
         def _mk(menu, label, slot, shortcut=None):
             a = QAction(label, self)
             if shortcut:
                 a.setShortcut(QKeySequence(shortcut))
+                # [PATCH-1.1-FIX11-NB103] ApplicationShortcut context
+                a.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
             a.triggered.connect(slot)
             menu.addAction(a)
             self._menubar_action_refs.append(a)
@@ -7096,6 +8325,9 @@ class MainWindow(QMainWindow):
             return
         if self.scan_thread and self.scan_thread.isRunning():
             QMessageBox.warning(self, t("title_scan_running"), t("warn_scan_running"))
+            return
+        if (self.dup_thread and self.dup_thread.isRunning()) or self._scan_in_progress:
+            self.statusBar().showMessage(t("status_busy"), 2000)
             return
         urls = event.mimeData().urls()
         if urls:
@@ -7184,38 +8416,39 @@ class MainWindow(QMainWindow):
         if item:
             item.setIcon(QIcon())
             self.gallery_view.list_widget.update_thumbnail_for_file(filepath)
-        # NB-97: rotate may break a dup group (hash changes).
-        # Remove every member of any last_dups group containing
-        # filepath from self.duplicates[cal]. Survivors stay in the
-        # set otherwise and keep ⚠️ marker until next Rescan.
+        # [PATCH-1.1-FIX11-NB126] rotate breaks the file's hash, so
+        # the rotated file is no longer a duplicate. Other group
+        # members remain duplicates of each other.
         if self.last_dups:
+            _cal_dups = self.duplicates.get(self.current_cal_name, set())
+            _cal_dups.discard(filepath)
             for _h, _grp in list(self.last_dups.items()):
                 if filepath in _grp:
-                    _cal_dups = self.duplicates.get(
-                        self.current_cal_name, set())
-                    for _fp in _grp:
-                        _cal_dups.discard(_fp)
-                    self.last_dups.pop(_h, None)
+                    _grp.remove(filepath)
+                    if len(_grp) <= 1:
+                        for _fp in _grp:
+                            _cal_dups.discard(_fp)
+                        self.last_dups.pop(_h, None)
                     break
-        # reset last_dups on rotate — any return path triggers rescan
+        self.last_dups_groups = []
         self._dups_stale = True
-        self.last_dups = None
         self.save_json()
 
     def on_file_deleted_viewer(self, filepath, trash_path=None):
         # don't reset stale on delete — _on_viewer_back must rescan after rotate
         self.save_state_for_undo({"trash": [(trash_path, filepath)] if trash_path else []})
-        # NB-97: deleted file may have been in a dup group; the
-        # survivor(s) would keep ⚠️ marker until next Rescan.
-        # Remove the whole group from self.duplicates[cal] here.
+        # [PATCH-1.1-FIX11-NB126] Only remove the deleted file from
+        # dup groups. Survivors may still be duplicates of each other.
         if self.last_dups:
+            _cal_dups = self.duplicates.get(self.current_cal_name, set())
+            _cal_dups.discard(filepath)
             for _h, _grp in list(self.last_dups.items()):
                 if filepath in _grp:
-                    _cal_dups = self.duplicates.get(
-                        self.current_cal_name, set())
-                    for _fp in _grp:
-                        _cal_dups.discard(_fp)
-                    self.last_dups.pop(_h, None)
+                    _grp.remove(filepath)
+                    if len(_grp) <= 1:
+                        for _fp in _grp:
+                            _cal_dups.discard(_fp)
+                        self.last_dups.pop(_h, None)
                     break
         self._purge_path_everywhere(filepath)
         self.save_json()
@@ -7305,9 +8538,8 @@ class MainWindow(QMainWindow):
                     _process_ui()
         self.progress_bar.setValue(_total)
         # sentinel key avoids collision with a calendar named "Categories"
-        if cat_missing:
-            report["__categories__"] = cat_missing
-        if not report:
+        # [PATCH-1.1-FIX11-NB137] structured report, no sentinel collision
+        if not report and not cat_missing:
             self.progress_bar.hide()
             self.progress_bar.setRange(0, 100)
             self.statusBar().clearMessage()
@@ -7317,11 +8549,108 @@ class MainWindow(QMainWindow):
         self.progress_bar.hide()
         self.progress_bar.setRange(0, 100)
         self.statusBar().clearMessage()
-        total = sum(len(m) for m in report.values())
-        lines = [f"  • {'Categories' if cal == '__categories__' else cal}: "
-                 f"{len(missing)}"
+        total = sum(len(m) for m in report.values()) + len(cat_missing)
+        lines = [f"  • {cal}: {len(missing)}"
                  for cal, missing in report.items()]
+        if cat_missing:
+            lines.append(f"  • Categories: {len(cat_missing)}")
         msg = t("confirm_clean_missing", total=total) + "\n\n" + "\n".join(lines)
+        # [PATCH-1.1-FIX2-04b]
+        # Ask user: Relink or Remove?
+        _relink_reply = QMessageBox.question(
+            self, t("title_relink"), t("confirm_relink"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            defaultButton=QMessageBox.StandardButton.Yes)
+            
+        if _relink_reply == QMessageBox.StandardButton.Yes:
+            new_folder = QFileDialog.getExistingDirectory(
+                self, t("relink_select_folder"))
+            if new_folder:
+                # Perform relink
+                _processed_relink = 0
+                _mapping = {}
+                _missing_files = set()
+                _all_missing_lists = list(report.values()) + [cat_missing]
+                for missing_list in _all_missing_lists:
+                    for old_path in missing_list:
+                        _missing_files.add(os.path.basename(old_path))
+                
+                # [PATCH-1.1-FIX15-A2] collect ALL candidates per
+                # basename. If a basename has >1 match, skip it —
+                # relinking to an arbitrary one risks pointing the
+                # calendar at a foreign file.
+                _found_names = {}
+                for root, dirs, files in os.walk(new_folder):
+                    for f in files:
+                        if f in _missing_files:
+                            _found_names.setdefault(f, []).append(
+                                os.path.join(root, f))
+
+                _ambiguous_count = 0
+                _seen_targets = set()
+                for missing_list in _all_missing_lists:
+                    for old_path in missing_list:
+                        _filename = os.path.basename(old_path)
+                        _cands = _found_names.get(_filename, [])
+                        if len(_cands) == 1:
+                            _target = _cands[0]
+                            if _target in _seen_targets:
+                                _ambiguous_count += 1
+                                continue
+                            _seen_targets.add(_target)
+                            _mapping[old_path] = _target
+                        elif len(_cands) > 1:
+                            _ambiguous_count += 1
+                            
+                if _mapping:
+                    self.save_state_for_undo()
+                    # Update calendars
+                    for cal_data in self.calendars.values():
+                        for d in list(cal_data.keys()):
+                            new_list = []
+                            for f in cal_data[d]:
+                                if f in _mapping:
+                                    new_list.append(_mapping[f])
+                                    _processed_relink += 1
+                                else:
+                                    new_list.append(f)
+                            cal_data[d] = new_list
+                    # Update categories
+                    for cat_files in self.categories.values():
+                        for i, f in enumerate(cat_files):
+                            if f in _mapping:
+                                cat_files[i] = _mapping[f]
+                    # Update duplicates
+                    for dup_set in self.duplicates.values():
+                        _new_dups = set()
+                        for f in dup_set:
+                            if f in _mapping:
+                                _new_dups.add(_mapping[f])
+                            else:
+                                _new_dups.add(f)
+                        dup_set.clear()
+                        dup_set.update(_new_dups)
+                        
+                    self.last_dups = None
+                    self.last_dups_groups = []
+                    self._dups_stale = False
+                    self.save_json()
+                    self.refresh_all_views()
+                    _msg = t("relink_success", n=_processed_relink)
+                    if _ambiguous_count:
+                        _msg += " " + t(
+                            "relink_ambiguous",
+                            n=_ambiguous_count)
+                    msg_info(self, t("info_done"), _msg)
+                    return
+                else:
+                    msg_info(self, t("error_title"),
+                             t("status_no_matching_files"))
+                    return
+            else:
+                return # User cancelled folder selection
+
+        # If No to relink, proceed with standard removal
         reply = QMessageBox.question(
             self, t("title_clean_missing"), msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
@@ -7334,7 +8663,7 @@ class MainWindow(QMainWindow):
         # for EVERY file → all_missing = all files → calendar purged.
         # Undo exists but user may not realize what happened.
         all_missing = []
-        for missing in report.values():
+        for missing in list(report.values()) + [cat_missing]:
             for f in missing:
                 if os.path.exists(f):
                     continue
@@ -7532,6 +8861,11 @@ class MainWindow(QMainWindow):
                 removed += 1
                 continue
             clean = {}
+            # [PATCH-1.1-FIX15-A5] cross-date dedupe: a path must appear
+            # in only ONE date-list per calendar. Without this,
+            # GalleryListWidget._file_to_item gets overwritten and
+            # orphan QListWidgetItems remain.
+            _global_seen = set()
             for k, v in cal_data.items():
                 if not isinstance(k, str):
                     logger.warning(f"Dropping non-str key {k!r} in calendar {cal_name!r}")
@@ -7556,9 +8890,18 @@ class MainWindow(QMainWindow):
                     continue
                 files = [f for f in v if isinstance(f, str)]
                 if len(files) < len(v):
-                    removed += len(v) - len(files)  # count invalid entries
-                if files:
-                    clean[k] = files
+                    removed += len(v) - len(files)
+                # [PATCH-1.1-FIX15-A5] dedupe paths across ALL date-lists
+                # of this calendar (superset of per-list dedupe).
+                _uniq = []
+                for _f in files:
+                    if _f in _global_seen:
+                        removed += 1
+                        continue
+                    _global_seen.add(_f)
+                    _uniq.append(_f)
+                if _uniq:
+                    clean[k] = _uniq
             self.calendars[cal_name] = clean
             # sanitize dups 
             valid_files = {f for files in clean.values() for f in files}
@@ -7605,6 +8948,15 @@ class MainWindow(QMainWindow):
                 _valid = [f for f in _cfiles if isinstance(f, str)]
                 if len(_valid) < len(_cfiles):
                     _cat_removed += len(_cfiles) - len(_valid)
+                _cseen = set()
+                _cuniq = []
+                for _f in _valid:
+                    if _f in _cseen:
+                        _cat_removed += 1
+                        continue
+                    _cseen.add(_f)
+                    _cuniq.append(_f)
+                _valid = _cuniq
                 # (P2): preserve EMPTY events. Previously
                 # `if _valid: _clean_cats[...]` dropped empty lists,
                 # so a user-created "New event" without any files
@@ -7660,7 +9012,8 @@ class MainWindow(QMainWindow):
         for cal_name, cal_data in self.calendars.items():
             for d_str in list(cal_data.keys()):
                 if filepath in cal_data[d_str]:
-                    cal_data[d_str].remove(filepath)
+                    cal_data[d_str] = [f for f in cal_data[d_str]
+                                        if f != filepath]
                     if not cal_data[d_str]:
                         del cal_data[d_str]
             # no phantom set 
@@ -7675,9 +9028,9 @@ class MainWindow(QMainWindow):
                 cat_files[:] = [f for f in cat_files if f != filepath]
 
     def show_calendar_from_gallery(self):
-        # combo first — reset was_in_dups to prevent stale dup view
         was_dups = (self.combo_view_mode.currentIndex() == 4)
         self.was_in_dups = False
+        self.current_gallery_context = None
         if was_dups:
             self.combo_view_mode.blockSignals(True)
             self.combo_view_mode.setCurrentIndex(0)
@@ -7689,12 +9042,8 @@ class MainWindow(QMainWindow):
     def update_combo(self):
         self.manager_view.update_combo(self.calendars, self.current_cal_name)
 
+    # [PATCH-1.1-FIX2-03]
     def on_cal_changed(self, name):
-        # NB-92: guard calendar switch mid-scan, same as NB-55 for
-        # create/rename/delete. Without this, current_cal_name changes
-        # while ScannerThread writes to captured _scan_cal_name ->
-        # user sees new (empty) calendar after merge, files landed
-        # in the old one.
         if self._guard_scan():
             try:
                 cb = self.manager_view.combo_cal
@@ -7704,15 +9053,36 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             return
-        # on_cal_changed no tab jump
-        if name and name in self.calendars and name != self.current_cal_name:
-            self.current_cal_name = name
-            self.duplicates.setdefault(self.current_cal_name, set())
-            self.last_dups = None
-            self.last_dups_groups = []  # clear groups on cal change 
-            self.save_json()
-            # Don't force a tab switch: user may be on Manage or Settings.
-            # When they click Calendar, switch_tab(0) will refresh the view.
+        # [PATCH-1.1-FIX15-B8] validate name FIRST — do not clear view
+        # state (or run a second _guard_scan) when combo re-emits the
+        # same value or an invalid one. Second _guard_scan previously
+        # duplicated the one at method top.
+        if not name or name not in self.calendars or name == self.current_cal_name:
+            return
+        # Clear stale view state before the actual switch.
+        if hasattr(self, "calendar_view"):
+            self.calendar_view._pending.clear()
+            self.calendar_view.scene_.clear()
+        if hasattr(self, "gallery_view") and hasattr(self.gallery_view, "list_widget"):
+            self.gallery_view.list_widget.clear_all()
+            self.gallery_view.list_widget._pending.clear()
+        self._reset_bg_progress()  # [PATCH-1.1-FIX9b]
+        # [PATCH-1.1-FIX15-B8] drop cross-calendar gallery context so
+        # refresh_all_views() cannot reopen a stale gallery context in
+        # the new calendar.
+        self.current_gallery_context = None
+        self._last_non_tab_stack = 0
+        # [PATCH-1.1-FIX3-D]
+        self.current_cal_name = name
+        self.duplicates.setdefault(self.current_cal_name, set())
+        self.last_dups = None
+        self.last_dups_groups = []
+        self.save_json()
+        # Check this new calendar for missing files
+        if self.config.get("ask_relink_on_startup", True):
+            QTimer.singleShot(500, self._check_startup_missing)
+        # Don't force a tab switch: user may be on Manage or Settings.
+        # When they click Calendar, switch_tab(0) will refresh the view.
 
     def create_calendar(self):
         # NB-55: match rename/clear/delete_calendar, which all guard
@@ -7763,6 +9133,8 @@ class MainWindow(QMainWindow):
         # from corrupted/legacy JSON where _sanitize didn't fill it
         self.duplicates[new] = self.duplicates.pop(old, set())
         self.current_cal_name = new
+        self.last_dups = None
+        self.last_dups_groups = []
         self.update_combo()
         self.save_json()
 
@@ -7784,6 +9156,62 @@ class MainWindow(QMainWindow):
                 logger.error(f"export_calendar failed: {e}")
                 msg_error(self, t("error_title"),
                           t("error_save_failed"))
+
+    # [PATCH-1.1-06d]
+    def export_events_json(self):
+        if not self.categories:
+            msg_info(self, t("info_done"), "No events to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("title_save_calendar"),
+            "events.json", "JSON (*.json)")
+        if path:
+            try:
+                _atomic_write_json(path, self.categories)
+                self.statusBar().showMessage(t("info_done"), 2000)
+            except Exception as e:
+                logger.error(f"export_events_json failed: {e}")
+                msg_error(self, t("error_title"), t("error_save_failed"))
+
+    # [PATCH-1.1-FIX2-05d]
+    def import_events_json(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import events (JSON)", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("Expected JSON object (event name -> list of paths)")
+            _to_add = {}
+            for ev_name, files in data.items():
+                if not isinstance(ev_name, str) or not isinstance(files, list):
+                    continue
+                _existing = self.categories.get(ev_name, [])
+                _new = [f for f in files if isinstance(f, str) and f not in _existing]
+                if _new:
+                    _to_add[ev_name] = _new
+            if not _to_add:
+                msg_info(self, t("info_done"), t("info_import_events_none"))
+                return
+            self.save_state_for_undo()
+            _added = 0
+            for ev_name, _new_files in _to_add.items():
+                if ev_name not in self.categories:
+                    self.categories[ev_name] = []
+                for f in _new_files:
+                    self.categories[ev_name].append(f)
+                    _added += 1
+            self.last_dups = None
+            self.last_dups_groups = []
+            self.save_json()
+            self.refresh_all_views()
+            self.manager_view.update_combo(self.calendars, self.current_cal_name)
+            msg_info(self, t("info_done"),
+                     t("status_import_events", n=_added))
+        except Exception as e:
+            msg_error(self, t("error_title"), f"Failed to import events: {e}")
 
     def load_external_calendar(self):
         if self._guard_scan():  # 
@@ -7873,6 +9301,7 @@ class MainWindow(QMainWindow):
             self.calendars[self.current_cal_name] = {}
             self.duplicates[self.current_cal_name] = set()
             self.last_dups = None
+            self.last_dups_groups = []
             self.change_view_mode(self.combo_view_mode.currentIndex())
             self.save_json()
 
@@ -7962,17 +9391,29 @@ class MainWindow(QMainWindow):
         name = dialog.get_name()
         if not name:
             return
+        _existing = self.categories.get(name, [])
+        _to_add = [f for f in files if f not in _existing]
+        if not _to_add:
+            return
         self.save_state_for_undo()
         if name not in self.categories:
             self.categories[name] = []
-        for f in files:
-            if f not in self.categories[name]:
-                self.categories[name].append(f)
+        for f in _to_add:
+            self.categories[name].append(f)
         self.save_json()
         self.manager_view.update_combo(self.calendars, self.current_cal_name)
         self.statusBar().showMessage(t("status_files_added", name=name), 3000)
 
     def remove_selected_from_event(self):
+        # [PATCH-1.1-FIX11-NB129] modal/busy/scan guard
+        _mw = QApplication.activeModalWidget()
+        if _mw is not None and _mw is not self:
+            return
+        if getattr(self, "_busy", False):
+            self.statusBar().showMessage(t("status_busy"), 2000)
+            return
+        if self._guard_scan():
+            return
         files = []
         if self.stack.currentIndex() == 4:
             items = self.gallery_view.get_selected_items()
@@ -7985,6 +9426,36 @@ class MainWindow(QMainWindow):
 
     def remove_from_event(self, files):
         if not files:
+            return
+        # [PATCH-1.1-FIX11-NB127] If we're in an event context, remove
+        # only from THAT event.
+        _ev = None
+        # [PATCH-1.1-FIX15-B1] honor event context from BOTH
+        # gallery-event mode (stack 4 + combo 3) AND viewer opened
+        # from an event (stack 5 with current_gallery_context pointing
+        # at an event name). Previously viewer context was ignored →
+        # file removed from ALL events.
+        if self.stack.currentIndex() == 4 and self.combo_view_mode.currentIndex() == 3:
+            _ev = self.current_gallery_context
+        elif self.stack.currentIndex() == 5:
+            _ctx = self.current_gallery_context
+            if _ctx and _ctx in self.categories:
+                _ev = _ctx
+        if _ev and _ev in self.categories:
+            _cat = self.categories[_ev]
+            # [PATCH-1.1-FIX15-B1] dedupe input to avoid ValueError on
+            # duplicate paths in `files`.
+            _files_dedup = list(dict.fromkeys(files))
+            _toremove = [f for f in _files_dedup if f in _cat]
+            if not _toremove:
+                return
+            self.save_state_for_undo()
+            for f in _toremove:
+                _cat.remove(f)
+            self.save_json()
+            self.refresh_all_views()
+            self.statusBar().showMessage(
+                t("status_removed_from_event", n=len(_toremove)), 3000)
             return
         self.save_state_for_undo()
         removed = 0
@@ -8004,7 +9475,41 @@ class MainWindow(QMainWindow):
         self.btn_nav_mgr.setChecked(index == 1)
         self.btn_nav_set.setChecked(index == 2)
         self.btn_nav_help.setChecked(index == 3)
+        # [PATCH-1.1-04b]
         if index == 0:
+            _restore = getattr(self, "_last_non_tab_stack", 0)
+            self._last_non_tab_stack = 0
+            if _restore == 5 and 0 <= self.image_viewer.current_index < len(self.image_viewer.files):
+                self.stack.setCurrentIndex(5)
+                # [PATCH-1.1-FIX15-B7] toolbar hidden in viewer mode —
+                # previously showed cal_toolbar (Add folder / view mode
+                # / Paste) over fullscreen viewer.
+                self.cal_toolbar_widget.hide()
+                return
+            # [PATCH-1.1-FIX8-13]
+            if _restore == 4 and self.current_gallery_context:
+                _scroll = 0
+                _dup_scroll = 0
+                if hasattr(self, "gallery_view"):
+                    if self.gallery_view.is_dups_mode:
+                        _dup_scroll = self.gallery_view.dup_gallery.verticalScrollBar().value()
+                    else:
+                        _scroll = self.gallery_view.list_widget.verticalScrollBar().value()
+                
+                if self.current_gallery_context == "ALL_DUPLICATES":
+                    if self.last_dups:
+                        self.open_duplicates_gallery()
+                        QTimer.singleShot(50, lambda: self.gallery_view.dup_gallery.verticalScrollBar().setValue(_dup_scroll))
+                        return
+                else:
+                    _m = ["days", "months", "years", "events", "duplicates"][
+                        self.combo_view_mode.currentIndex()]
+                    # [PATCH-1.1-FIX8C-13]
+                    if _m != "duplicates":
+                        self.open_gallery(self.current_gallery_context, _m)
+                        QTimer.singleShot(50, lambda: self.gallery_view.list_widget.verticalScrollBar().setValue(_scroll))
+                        QTimer.singleShot(200, lambda: self.gallery_view.list_widget.verticalScrollBar().setValue(_scroll))
+                        return
             # no dup-scan from nav 
             if self.was_in_dups or self.combo_view_mode.currentIndex() == 4:
                 if self.last_dups:
@@ -8023,25 +9528,124 @@ class MainWindow(QMainWindow):
                 self.stack.setCurrentIndex(0)
                 self.cal_toolbar_widget.show()
                 self.change_view_mode(self.combo_view_mode.currentIndex())
-        elif index == 1:
-            self.was_in_dups = (self.stack.currentIndex() == 4 and self.gallery_view.is_dups_mode)
-            self.stack.setCurrentIndex(1)
+        # [PATCH-1.1-04a]
+        elif index in (1, 2, 3):
+            _cur_stack = self.stack.currentIndex()
+            if _cur_stack in (4, 5):
+                self._last_non_tab_stack = _cur_stack
+            self.was_in_dups = (_cur_stack == 4 and self.gallery_view.is_dups_mode)
+            self.stack.setCurrentIndex(index)
             self.cal_toolbar_widget.hide()
-            self.manager_view.update_combo(self.calendars, self.current_cal_name)
-        elif index == 2:
-            self.was_in_dups = (self.stack.currentIndex() == 4 and self.gallery_view.is_dups_mode)
-            self.stack.setCurrentIndex(2)
-            self.cal_toolbar_widget.hide()
-        elif index == 3:
-            self.was_in_dups = (self.stack.currentIndex() == 4 and self.gallery_view.is_dups_mode)
-            self.stack.setCurrentIndex(3)
-            self.cal_toolbar_widget.hide()
+            if index == 1:
+                self.manager_view.update_combo(self.calendars, self.current_cal_name)
 
     def update_priority(self, new_priority):
         self.priority = new_priority
         self.save_json()
 
     # ---- scanning
+    # [PATCH-1.1-FIX2-08d]
+    # [PATCH-1.1-FIX3-B]
+    # [PATCH-1.1-FIX4-05b]
+    # [PATCH-1.1-FIX6-02]
+    def force_resort(self):
+        if self._guard_scan():
+            return
+        if getattr(self, "_busy", False):
+            self.statusBar().showMessage(t("status_busy"), 2000)
+            return
+        cal_data = self.calendars.get(self.current_cal_name, {})
+        _total = sum(len(v) for v in cal_data.values())
+        if _total == 0:
+            return
+        
+        # [PATCH-1.1-FIX7-02]
+        # [PATCH-1.1-FIX16-C7] save redo history before save_state
+        _saved_redo_stack = list(self.redo_stack)
+        _saved_redo_actions = list(self.redo_actions)
+        self.save_state_for_undo()
+        self._busy = True
+        dlg = None
+        try:
+            dlg = QProgressDialog(t("btn_apply_priority_msg"),
+                                  t("toolbar_cancel"), 0, _total, self)
+            dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+            dlg.setMinimumDuration(0)
+            dlg.setValue(0)
+            _processed = 0
+            _new_data = {}
+            # [PATCH-1.1-FIX15-B2] dedupe paths — a file that was in
+            # multiple dates must land in only one new date, otherwise
+            # saves duplicate entries into calendar_data.json.
+            _seen_paths = set()
+
+            def _try_cancel():
+                if dlg is not None and dlg.wasCanceled():
+                    logger.info("force_resort cancelled by user")
+                    # pop the snapshot we pushed at start — otherwise
+                    # Ctrl+Z "undoes" nothing.
+                    if self.history:
+                        self.history.pop()
+                    if self.undo_actions:
+                        self.undo_actions.pop()
+                    # [PATCH-1.1-FIX16-C7] restore redo history
+                    self.redo_stack = _saved_redo_stack
+                    self.redo_actions = _saved_redo_actions
+                    self._update_undo_buttons()
+                    return True
+                return False
+
+            for date_str, files in cal_data.items():
+                for fp in files:
+                    if not os.path.exists(fp):
+                        # [FIX15-B2] missing files still keep their
+                        # date, but respect dedupe and count toward
+                        # progress so bar reaches 100%.
+                        if fp not in _seen_paths:
+                            _new_data.setdefault(date_str, []).append(fp)
+                            _seen_paths.add(fp)
+                        _processed += 1
+                        if _processed % 50 == 0:
+                            dlg.setValue(_processed)
+                            if _try_cancel():
+                                return
+                        continue
+                    if fp in _seen_paths:
+                        _processed += 1
+                        continue
+                    _seen_paths.add(fp)
+                    folder_name = os.path.basename(os.path.dirname(fp))
+                    _d = get_file_date(fp, folder_name, self.priority)
+                    if _d is None:
+                        _d_str = date_str
+                    else:
+                        _d_str = _d.strftime("%Y-%m-%d")
+                    _new_data.setdefault(_d_str, []).append(fp)
+                    _processed += 1
+                    if _processed % 50 == 0:
+                        dlg.setValue(_processed)
+                        if _try_cancel():
+                            return
+            self.calendars[self.current_cal_name] = _new_data
+            # [FIX15-B2] sanitize after resort — validates dates and
+            # dedupes any residual cross-date duplicates.
+            self._sanitize_calendars()
+            self.save_json()
+            self.change_view_mode(self.combo_view_mode.currentIndex())
+            self.statusBar().showMessage(
+                t("status_found", total=_processed, dups=0), 5000)
+        except Exception as e:
+            logger.exception("force_resort failed")
+            msg_error(self, t("error_title"), str(e))
+        finally:
+            if dlg is not None:
+                try:
+                    dlg.close()
+                    dlg.deleteLater()
+                except RuntimeError:
+                    pass
+            self._busy = False
+
     def import_folder(self):
         if self._guard_scan():  # (covers scan_thread.isRunning too)
             return
@@ -8110,8 +9714,23 @@ class MainWindow(QMainWindow):
             self._scan_cal_name = self.current_cal_name
             self._scan_cancelled = False  # reset scan flags 
             self.last_dups = None
-            self.scan_thread = ScannerThread(folder, self.priority)
+            # [PATCH-1.1-FIX15-A6] pass current cache_dir/trash_dir
+            # so ScannerThread skips them even if they live outside
+            # DATA_DIR.
+            _extra_skip = []
+            try:
+                _cd = self.config.get("cache_dir")
+                if _cd:
+                    _extra_skip.append(str(_cd))
+                _td = self.config.get("trash_dir")
+                if _td:
+                    _extra_skip.append(str(_td))
+            except Exception:
+                pass
+            self.scan_thread = ScannerThread(folder, self.priority,
+                                             extra_skip_paths=_extra_skip)
             _thread = self.scan_thread
+            self._scan_cal_id = id(self.calendars.get(self.current_cal_name))
             self.scan_thread.progress.connect(self.update_progress)
             self.scan_thread.file_found.connect(self.add_file_to_data)
             # capture thread reference for stale check
@@ -8199,12 +9818,37 @@ class MainWindow(QMainWindow):
             return
         # scan into captured calendar
         target_name = getattr(self, "_scan_cal_name", self.current_cal_name)
+        _expected_id = getattr(self, "_scan_cal_id", None)
         if target_name not in self.calendars:
             # log fallback 
+            # [PATCH-1.1-FIX15-A3] target calendar deleted/renamed
+            # mid-scan — DISCARD results, never merge into a different
+            # calendar. Same policy as on_duplicates_found.
             logger.warning(
-                f"scan_finished: target calendar {target_name!r} no longer exists, "
-                f"falling back to {self.current_cal_name!r}")
-            target_name = self.current_cal_name
+                f"scan_finished: target calendar {target_name!r} "
+                f"no longer exists, discarding results")
+            self._scanned_files.clear()
+            self._scan_cal_name = None
+            self.btn_import.setEnabled(True)
+            self.btn_cancel_scan.hide()
+            self.progress_bar.hide()
+            self.scan_thread = None
+            self._end_scan()
+            return
+        # [PATCH-1.1-FIX11-NB136] identity check
+        if _expected_id is not None and target_name in self.calendars:
+            if id(self.calendars[target_name]) != _expected_id:
+                logger.warning(
+                    f"scan_finished: calendar {target_name!r} was recreated "
+                    f"during scan; discarding results")
+                self._scanned_files.clear()
+                self._scan_cal_name = None
+                self.btn_import.setEnabled(True)
+                self.btn_cancel_scan.hide()
+                self.progress_bar.hide()
+                self.scan_thread = None
+                self._end_scan()
+                return
         if target_name not in self.calendars:
             logger.error("scan_finished: no valid calendar, discarding scan results")
             self._scanned_files.clear()
@@ -8226,6 +9870,13 @@ class MainWindow(QMainWindow):
                 self.save_state_for_undo()
             cal_data = self.calendars[target_name]
             for fp in self._scanned_files:
+                _parent = os.path.dirname(fp) or "."
+                try:
+                    _parent_ok = (os.path.isdir(_parent) and os.access(_parent, os.R_OK))
+                except OSError:
+                    _parent_ok = False
+                if not _parent_ok:
+                    continue  # [PATCH-1.1-FIX10-05] drive offline, don't purge
                 for d in list(cal_data.keys()):
                     if fp in cal_data[d]:
                         cal_data[d].remove(fp)
@@ -8343,10 +9994,14 @@ class MainWindow(QMainWindow):
             self._cut_missing_streak.pop(_fp, None)
         # always proceed — even if removed==0, categories/dups may
         # have been touched and UI needs refreshing.
-        self.last_dups = remaining_dups if remaining_dups else None
+        # [PATCH-1.1-FIX15-A4] {} sentinel (not None) so sync clears
+        # stale ⚠️ markers when remaining is empty.
+        self.last_dups = remaining_dups if remaining_dups else {}
         self._sync_duplicates_from_last_dups()  # NB-70
         self.last_dups_groups = []
-        self._dups_stale = False
+        # [PATCH-1.1-FIX16-C11] do NOT clear _dups_stale — if the user
+        # rotated a file, _dups_stale is True and the viewer back path
+        # must rescan to pick up the new hash.
         self.save_json()
         # rebuild current view
         if self.stack.currentIndex() == 4:
@@ -8426,6 +10081,17 @@ class MainWindow(QMainWindow):
             else:
                 self._gallery_needs_rebuild = True
                 self._on_viewer_back()
+        elif self.stack.currentIndex() in (1, 2, 3):
+            # [PATCH-1.1-FIX16-C5] non-viewer tabs: update viewer files
+            # and flag gallery rebuild so returning to viewer is safe.
+            _ms = set(confirmed_missing)
+            if self.image_viewer.files:
+                self.image_viewer.files = [
+                    f for f in self.image_viewer.files if f not in _ms]
+                if self.image_viewer.current_index >= len(self.image_viewer.files):
+                    self.image_viewer.current_index = max(
+                        0, len(self.image_viewer.files) - 1)
+            self._gallery_needs_rebuild = True
         # use len(missing) — actual files moved; `removed` counts
         # calendar entries, which differs if same file was in two places.
         moved_count = len(confirmed_missing)
@@ -8479,7 +10145,9 @@ class MainWindow(QMainWindow):
         cal_data = self.calendars[self.current_cal_name]
         self.current_gallery_context = key
         # dups from last_dups 
-        if self.last_dups:
+        # [PATCH-1.1-FIX15-A4] distinguish None (no scan) from {}
+        # (scan ran, zero dups) — NB-130 contract.
+        if self.last_dups is not None:
             dups = {fp for group in self.last_dups.values() for fp in group}
         else:
             # NB-46: fall back to persisted self.duplicates.
@@ -8501,7 +10169,10 @@ class MainWindow(QMainWindow):
                 ((d, files) for d, files in cal_data.items() if d.startswith(key)),
                 key=lambda x: x[0])
             for ds, files in matching:
-                d = datetime.datetime.strptime(ds, "%Y-%m-%d")
+                try:
+                    d = datetime.datetime.strptime(ds, "%Y-%m-%d")
+                except (ValueError, TypeError):
+                    continue
                 grouped[f"{d.day} {month_name(d.month)}"] = files
             y, m = map(int, key.split("-"))
             title = f"{month_name(m)} {y}"
@@ -8539,10 +10210,67 @@ class MainWindow(QMainWindow):
         self.image_viewer.setFocus()
         self._update_undo_buttons()
 
+    # [PATCH-1.1-07g]
+    def export_event_media(self):
+        if self.current_gallery_context == "ALL_DUPLICATES" or not self.current_gallery_context:
+            return
+        if self._guard_scan(): return
+        if getattr(self, "_busy", False):
+            self.statusBar().showMessage(t("status_busy"), 2000)
+            return
+        files = self.categories.get(self.current_gallery_context, [])
+        if not files:
+            msg_info(self, t("info_done"), "No files in this event.")
+            return
+        folder = QFileDialog.getExistingDirectory(self, t("settings_share_export"))
+        if not folder:
+            return
+        self._busy = True
+        try:
+            n = len(files)
+            self.progress_bar.setRange(0, n)
+            self.progress_bar.show()
+            _process_ui()
+            copied = 0
+            for i, f in enumerate(files):
+                if os.path.exists(f):
+                    try:
+                        dest = os.path.join(folder, os.path.basename(f))
+                        # [PATCH-1.1-FIX15-P2-3] if dest == source, no
+                        # copy needed — previously SameFileError,
+                        # logged, file silently not counted.
+                        try:
+                            if os.path.exists(dest) and os.path.samefile(f, dest):
+                                copied += 1
+                                continue
+                        except (OSError, ValueError):
+                            pass
+                        if os.path.exists(dest):
+                            base, ext = os.path.splitext(dest)
+                            _n = 1
+                            while os.path.exists(dest):
+                                dest = f"{base}_{_n}{ext}"
+                                _n += 1
+                        shutil.copy2(f, dest)
+                        copied += 1
+                    except Exception as e:
+                        logger.warning(f"export_event_media: {f} -> {folder}: {e}")
+                if i % 10 == 0:
+                    self.progress_bar.setValue(i+1)
+                    _process_ui()
+            msg_info(self, t("info_done"),
+                     t("status_export_media", n=copied))
+        finally:
+            self.progress_bar.hide()
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setFormat("%v / %m")
+            self._busy = False
+
     def _on_viewer_copy(self, filepath):
         """viewer copy also populates internal clipboard."""
         # always stop cut-watch — intent changed to copy
         self._cut_watch_timer.stop()
+        self._cut_missing_streak.clear()
         if filepath and os.path.exists(filepath):
             self.clipboard_files = [filepath]
             self.clipboard_action = "copy"
@@ -8559,7 +10287,9 @@ class MainWindow(QMainWindow):
         # cap retries at 60 (~30 seconds). If scan never finishes
         # or _busy never clears, log once and give up instead of
         # spamming forever.
-        _CAP = 60
+        # [PATCH-1.1-FIX15-A9-NB123] cap raised 60 (~30s) → 300 (~150s).
+        # Long HDD/network scans can take minutes; 30s was too short.
+        _CAP = 300
         if getattr(self, "_scan_in_progress", False):
             if _attempt >= _CAP:
                 logger.warning(
@@ -8598,16 +10328,12 @@ class MainWindow(QMainWindow):
             self._busy = False
 
     def _on_files_moved_externally_impl(self, filepaths):
-        # stop cut-watch and drop moved paths from internal clipboard
+        # stop cut-watch
         self._cut_watch_timer.stop()
-        self.clipboard_files = [f for f in self.clipboard_files
-                                if f not in filepaths]
-        if not self.clipboard_files:
-            self.clipboard_action = None
-            self.btn_paste.setEnabled(False)
-        elif self.clipboard_action == "move":
-            # some files still in clipboard — resume external-move watch
-            self._cut_watch_timer.start()
+        # [PATCH-1.1-FIX15-A7] compute confirmed-moved set FIRST, then
+        # filter clipboard ONLY by confirmed-moved. Previously the
+        # whole batch was removed from clipboard even if OS only
+        # moved some of them (partial drag-move).
         # (P1 data-loss-adjacent): parent-dir accessibility
         # check. If external drive disconnected after drag-move,
         # os.path.exists() returns False for ALL files -> purge
@@ -8626,23 +10352,42 @@ class MainWindow(QMainWindow):
                 _p_ok = False
             if _p_ok:
                 missing.append(f)
+        _miss_set = set(missing)
+        self.clipboard_files = [f for f in self.clipboard_files
+                                if f not in _miss_set]
+        if not self.clipboard_files:
+            self.clipboard_action = None
+            self.btn_paste.setEnabled(False)
+        elif self.clipboard_action == "move":
+            # some files still in clipboard — resume external-move watch
+            self._cut_watch_timer.start()
         if not missing:
             return
         logger.info(
             f"drag move: {len(missing)} file(s) moved externally")
         # capture remaining dups from the OLD last_dups BEFORE clearing
         remaining_dups = self._get_remaining_dups()
+        # [PATCH-1.1-FIX16-C12] save old duplicates to detect changes
+        _old_dups = copy.deepcopy(self.duplicates)
         removed = self._purge_specific_paths(missing)
         # use None (not {}) when empty — change_view_mode(4) relies on
         # `last_dups is not None` to know a scan was already done
-        self.last_dups = remaining_dups if remaining_dups else None
+        # [PATCH-1.1-FIX15-A4] {} sentinel (not None) so sync clears
+        # stale ⚠️ markers when remaining is empty.
+        self.last_dups = remaining_dups if remaining_dups else {}
         self._sync_duplicates_from_last_dups()  # NB-70
         self.last_dups_groups = []
-        self._dups_stale = False  # groups already correct (hashes unchanged)
-        if removed:
+        # [PATCH-1.1-FIX16-C11] do NOT clear _dups_stale.
+        # [PATCH-1.1-FIX16-C12] save even if removed==0 when dups
+        # actually changed.
+        if removed or self.duplicates != _old_dups:
             self.save_json()
         # rebuild whichever view is active
-        if self.stack.currentIndex() == 4:
+        # [PATCH-1.1-FIX15-P2-12] handle stack 0 (Calendar) and 5 (Viewer)
+        # too — previously only stack 4 refreshed, so a deferred drag-move
+        # (after _busy/scan) left a stale UI in Calendar/Viewer.
+        _cur_stack = self.stack.currentIndex()
+        if _cur_stack == 4:
             in_dups = (self.gallery_view.is_dups_mode
                        or self.current_gallery_context == "ALL_DUPLICATES")
             if in_dups:
@@ -8659,6 +10404,40 @@ class MainWindow(QMainWindow):
                     self.open_gallery(self.current_gallery_context, mode)
                     QTimer.singleShot(50, lambda: self.gallery_view.list_widget
                                       .verticalScrollBar().setValue(scroll))
+        elif _cur_stack == 0:
+            try:
+                self.change_view_mode(self.combo_view_mode.currentIndex())
+            except Exception:
+                logger.exception(
+                    "_on_files_moved: change_view_mode(stack 0) failed")
+        elif _cur_stack == 5:
+            try:
+                _viewer_files = self.image_viewer.files
+                if _viewer_files:
+                    _removed_set = set(missing)
+                    _new_files = [f for f in _viewer_files
+                                  if f not in _removed_set]
+                    if len(_new_files) != len(_viewer_files):
+                        _cur_idx = self.image_viewer.current_index
+                        _cur_fp = (_viewer_files[_cur_idx]
+                                   if 0 <= _cur_idx < len(_viewer_files)
+                                   else None)
+                        self.image_viewer.files = _new_files
+                        if _cur_fp and _cur_fp in _new_files:
+                            self.image_viewer.current_index = _new_files.index(_cur_fp)
+                        elif _new_files:
+                            self.image_viewer.current_index = min(
+                                _cur_idx, len(_new_files) - 1)
+                        else:
+                            self.image_viewer.current_index = -1
+                        self._gallery_needs_rebuild = True
+                        if not _new_files:
+                            self._on_viewer_back()
+                        else:
+                            self.image_viewer.update_view()
+            except Exception:
+                logger.exception(
+                    "_on_files_moved: viewer refresh failed")
         self.statusBar().showMessage(
             t("status_move_done", n=len(missing)), 5000)
 
@@ -8733,14 +10512,13 @@ class MainWindow(QMainWindow):
         successful = []
         for i, item in enumerate(items):
             fp = item.data(ROLE_FILEPATH)
-            # skip list in dup — list_widget is empty in dup view
-            if not self.gallery_view.is_dups_mode:
-                self.gallery_view.list_widget.remove_item_by_filepath(fp)
             success, tp, err = move_to_trash(fp)
             if success:
                 if tp:
                     trashed.append((tp, fp))
                 successful.append(fp)
+                if not self.gallery_view.is_dups_mode:
+                    self.gallery_view.list_widget.remove_item_by_filepath(fp)
             else:
                 failed += 1
             if n > 1 and i % 3 == 0:
@@ -8758,12 +10536,11 @@ class MainWindow(QMainWindow):
         self.save_json()
         if self.current_gallery_context == "ALL_DUPLICATES":
             remaining = self._get_remaining_dups()
-            # NB-59: sync last_dups with post-delete state so
-            # open_duplicates_gallery uses fresh data. Mirror
-            # on_gallery_delete_dups, which sets this explicitly.
-            # None (not {}) when empty -- change_view_mode(4) relies
-            # on `last_dups is not None` to know a scan ran.
-            self.last_dups = remaining or None
+            # [PATCH-1.1-FIX15-A4] use {} (not None) when empty so
+            # _sync_duplicates_from_last_dups() actually clears stale
+            # ⚠️ markers. change_view_mode(4) uses `is not None` and
+            # still works — {} is not None.
+            self.last_dups = remaining if remaining else {}
             self._sync_duplicates_from_last_dups()  # NB-70
             if remaining:
                 self.open_duplicates_gallery()
@@ -8865,9 +10642,16 @@ class MainWindow(QMainWindow):
                 if fw.canPaste():
                     fw.paste()
                     return
+                else:
+                    if isinstance(fw, (QLineEdit, QTextEdit, QPlainTextEdit, QTextBrowser)):
+                        return
             except Exception:
                 pass
-        if self._guard_scan():  # 
+        # [PATCH-1.1-FIX11-NB128] modal guard
+        _mw = QApplication.activeModalWidget()
+        if _mw is not None and _mw is not self:
+            return
+        if self._guard_scan():
             return
         # require gallery 
         if self.stack.currentIndex() != 4:
@@ -9025,22 +10809,66 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, t("error_title"),
                                     t("error_paste", path=fp, err=str(e)))
-                # cleanup partial dest if we created it (and
-                # it didn't exist before). shutil.copy2 leaves a
-                # truncated file on disk if I/O fails mid-write —
-                # orphan garbage that undo cannot restore (no
-                # entry in "created"), and blocks undo of overwrite
-                # (destination occupied).
-                # (P0): only clean for copy. For move, dest
-                # is the ONLY copy (fp is gone) -- removing it
-                # destroys the file. Skip, leave moved file.
+                # [PATCH-1.1-FIX12-NB95] if we trashed the original
+                # dest during overwrite, restore it on copy failure
+                # (otherwise the file is lost — only in trash, and
+                # user may not realize Ctrl+Z is needed).
+                _restored_overwrite = False
                 if (self.clipboard_action == "copy"
+                        and overwritten
+                        and overwritten[-1][1] == dest):
+                    _last_tp, _last_orig = overwritten[-1]
+                    if os.path.exists(dest):
+                        try:
+                            os.remove(dest)
+                        except OSError:
+                            pass
+                    if os.path.exists(_last_tp):
+                        _ok_rst, _ = restore_from_trash(_last_tp, dest)
+                        if _ok_rst:
+                            overwritten.pop()
+                            _restored_overwrite = True
+                            logger.info(
+                                f"paste: restored overwritten dest "
+                                f"after failed copy: {dest}")
+                        else:
+                            logger.warning(
+                                f"paste: could not restore overwritten "
+                                f"dest — original remains in trash: {dest}")
+                if (not _restored_overwrite
+                        and self.clipboard_action == "copy"
                         and not _dest_existed_before
                         and os.path.exists(dest)):
                     try:
                         os.remove(dest)
                     except OSError:
                         pass
+                # [PATCH-1.1-FIX15-A1-NB125] move + overwrite + partial
+                # dest: original dest was trashed, shutil.move failed
+                # mid-copy (dest partial, fp still on disk). Treat dest
+                # as partial of this attempt, restore original, keep fp
+                # for retry. Without this, fp dropped from clipboard,
+                # partial dest orphaned, undo blocked by occupied path.
+                if (self.clipboard_action == "move"
+                        and overwritten
+                        and overwritten[-1][1] == dest
+                        and os.path.exists(fp)):
+                    _last_tp, _last_orig = overwritten[-1]
+                    if os.path.exists(dest):
+                        try:
+                            os.remove(dest)
+                        except OSError:
+                            pass
+                    if os.path.exists(_last_tp):
+                        _ok_rst2, _ = restore_from_trash(_last_tp, dest)
+                        if _ok_rst2:
+                            overwritten.pop()
+                            _restored_overwrite = True
+                            logger.info(
+                                f"paste: restored overwritten dest "
+                                f"after failed move: {dest}")
+                    remaining.append(fp)
+                    continue
                 # NB-52: for move, dest is the only copy on disk.
                 # Main-body exception fired after shutil.move but
                 # before calendar update -> phantom calendar (fp in
@@ -9074,6 +10902,19 @@ class MainWindow(QMainWindow):
                     except Exception as _e2:
                         logger.warning(
                             f"paste: post-move calendar fixup failed: {_e2}")
+                # [PATCH-1.1-FIX16-C2] move without overwrite:
+                # if shutil.move failed mid-copy, fp still exists,
+                # dest is partial. Remove partial dest, keep fp.
+                if (self.clipboard_action == "move"
+                        and os.path.exists(fp)
+                        and os.path.exists(dest)):
+                    if os.path.exists(dest):
+                        try:
+                            os.remove(dest)
+                        except OSError:
+                            pass
+                    remaining.append(fp)
+                    continue
                 # NB-72: for move-action, if shutil.move already
                 # succeeded, fp no longer exists on disk. Re-adding it
                 # to `remaining` yields a dead path in the clipboard
@@ -9090,6 +10931,10 @@ class MainWindow(QMainWindow):
             _action["overwritten"] = overwritten
         if _action and self.undo_actions:
             self.undo_actions[-1] = _action
+        elif not _action and self.undo_actions:
+            self.history.pop()
+            self.undo_actions.pop()
+            self._update_undo_buttons()
         self.last_dups = None
         self.last_dups_groups = []
         # NB-71: progress bar was shown above for n > 1; hide here.
@@ -9241,20 +11086,27 @@ class MainWindow(QMainWindow):
                 # NB-110: require old_count >= _MIN_BACKUP_THRESHOLD.
                 # Previously 5 -> 4 (20% drop, 1 file) fired a backup,
                 # spamming BACKUP_KEEP slots on tiny libraries.
-                if (old_count >= _MIN_BACKUP_THRESHOLD
+                # [PATCH-1.1-FIX15-P2-9] count→0 must ALWAYS trigger
+                # backup — losing everything is data-loss even for
+                # 10-file libraries. Below threshold only applies to
+                # <5% drop detection (avoid spam on tiny deltas).
+                if old_count > 0 and new_count == 0:
+                    _needs_backup = True
+                elif (old_count >= _MIN_BACKUP_THRESHOLD
                         and new_count >= 0
-                        and (new_count == 0
-                             or new_count < old_count * 0.95)):
+                        and new_count < old_count * 0.95):
                     _needs_backup = True
-                if (_old_cal >= _MIN_BACKUP_THRESHOLD
+                if _old_cal > 0 and _new_cal == 0:
+                    _needs_backup = True
+                elif (_old_cal >= _MIN_BACKUP_THRESHOLD
                         and _new_cal >= 0
-                        and (_new_cal == 0
-                             or _new_cal < _old_cal * 0.95)):
+                        and _new_cal < _old_cal * 0.95):
                     _needs_backup = True
-                if (_old_cat >= _MIN_BACKUP_THRESHOLD
+                if _old_cat > 0 and _new_cat == 0:
+                    _needs_backup = True
+                elif (_old_cat >= _MIN_BACKUP_THRESHOLD
                         and _new_cat >= 0
-                        and (_new_cat == 0
-                             or _new_cat < _old_cat * 0.95)):
+                        and _new_cat < _old_cat * 0.95):
                     _needs_backup = True
                 if _needs_backup:
                     backup_result = _backup_calendar_data(
@@ -9264,6 +11116,12 @@ class MainWindow(QMainWindow):
                                f"cat {_old_cat}->{_new_cat}")
                     if backup_result is False:
                         _backup_failed = True
+                        _now = time.time()
+                        if _now - getattr(self, "_last_backup_fail_ts", 0) < 300:
+                            logger.warning(
+                                "backup failed again within 5min cooldown")
+                        else:
+                            self._last_backup_fail_ts = _now
                         logger.error("Backup failed")
                         # NB-36: destructive save + backup
                         # failed = old state overwritten without any
@@ -9285,19 +11143,15 @@ class MainWindow(QMainWindow):
                 logger.debug(f"backup check skipped: {e}")
             try:
                 _atomic_write_json(self.json_path, new_state)
-                # (P1): do NOT update _last_saved_count when
-                # backup failed. Otherwise next save sees
-                # new_count == old_count and skips threshold check
-                # -- backup is never retried. Extends NB-36.
-                if not _backup_failed:
-                    self._last_saved_count = new_count
-                    # also update split counters on success so
-                    # next save compares against fresh baselines.
-                    if _new_cal >= 0:
-                        self._last_saved_cal_count = _new_cal
-                    if _new_cat >= 0:
-                        self._last_saved_cat_count = _new_cat
-                else:
+                # [PATCH-1.1-FIX16-C3] update counters even if backup
+                # failed. The file WAS written, so next save should
+                # compare against this new baseline.
+                self._last_saved_count = new_count
+                if _new_cal >= 0:
+                    self._last_saved_cal_count = _new_cal
+                if _new_cat >= 0:
+                    self._last_saved_cat_count = _new_cat
+                if _backup_failed:
                     self.statusBar().showMessage(
                         t("warn_backup_failed"), 5000)
                 return True
@@ -9493,10 +11347,18 @@ class MainWindow(QMainWindow):
             pass
         # flush debounced save 
         self._save_timer.stop()
-        # NB-135: no backup-fail dialog here; the final force=True save
-        # below is the single source of truth for NB-36.
-        save_ok = self._do_save_json(skip_backup_dialog=True) is not False
-        # if save failed, warn user before close
+        # [PATCH-1.1-FIX10-07]
+        # Stop PreviewCounterThread before anything else
+        if hasattr(self.gallery_view, "_preview_counter") and self.gallery_view._preview_counter:
+            _pc = self.gallery_view._preview_counter
+            self.gallery_view._preview_counter = None
+            _pc.stop()
+            if _pc.isRunning():
+                _pc.wait(2000)
+        # NB-135: first save with skip_backup_dialog=False so user is
+        # prompted before overwriting if backup fails.
+        save_ok = self._do_save_json(skip_backup_dialog=False) is not False
+        _user_forced_close = not save_ok
         if save_ok:
             reply = QMessageBox.question(
                 self, t("title_exit"), t("confirm_exit"),
@@ -9536,11 +11398,21 @@ class MainWindow(QMainWindow):
                         _th.terminate()
                         _th.wait(2000)
             self._cut_watch_timer.stop()  # stop polling timer
-            for pool in (
+            # [PATCH-1.1-FIX3-G]
+            _pools = [
                 self.calendar_view.threadpool,
                 self.gallery_view.list_widget.threadpool,
                 self.gallery_view.dup_gallery.threadpool,
-            ):
+            ]
+            _bg_pool = getattr(self.gallery_view.list_widget, "_bg_pool", None)
+            if _bg_pool is not None:
+                _pools.append(_bg_pool)
+            # [PATCH-1.1-FIX12] also drain calendar_view._bg_pool —
+            # otherwise calendar bg threads may linger after close
+            _cal_bg = getattr(self.calendar_view, "_bg_pool", None)
+            if _cal_bg is not None:
+                _pools.append(_cal_bg)
+            for pool in _pools:
                 pool.clear()
                 pool.waitForDone(1500)
             QThreadPool.globalInstance().clear()
@@ -9557,9 +11429,16 @@ class MainWindow(QMainWindow):
             # checked it at the top), but skip_backup_dialog=False
             # so NB-36 dialog fires if backup fails again -- user
             # gets a final chance to cancel the destructive save.
+            # [PATCH-1.1-02b]
             _final_ok = self._do_save_json(
                 force=True, skip_backup_dialog=False)
             if _final_ok is False:
+                if _user_forced_close:
+                    logger.warning(
+                        "closeEvent: final save failed after user "
+                        "chose close-anyway — closing anyway")
+                    event.accept()
+                    return
                 try:
                     logger.error(
                         "closeEvent: final save failed")
@@ -9582,6 +11461,14 @@ class MainWindow(QMainWindow):
                     if (self.clipboard_action == "move"
                             and self.clipboard_files):
                         self._cut_watch_timer.start()
+                    # [PATCH-1.1-FIX16-C13] restart preview counter
+                    if (self.config.get("bg_thumb_gen", False)
+                            and self.stack.currentIndex() == 4
+                            and not self.gallery_view.is_dups_mode
+                            and getattr(self.gallery_view, "_preview_counter", None) is None):
+                        _gdata = getattr(self.gallery_view, "raw_grouped_data", None)
+                        if _gdata:
+                            self.gallery_view._start_preview_count(_gdata)
                 except Exception:
                     logger.exception("closeEvent: UI restore failed")
                 event.ignore()
@@ -9599,6 +11486,20 @@ class MainWindow(QMainWindow):
                     self._cut_watch_timer.start()
                 except Exception:
                     pass
+            # [PATCH-1.1-FIX15-P2-7] closeEvent stopped PreviewCounterThread
+            # before confirmation. If user cancels, restart it so
+            # background preview progress doesn't silently stay dead.
+            try:
+                if (self.config.get("bg_thumb_gen", False)
+                        and self.stack.currentIndex() == 4
+                        and not self.gallery_view.is_dups_mode):
+                    if getattr(self.gallery_view, "_preview_counter", None) is None:
+                        _gdata = getattr(self.gallery_view, "raw_grouped_data", None)
+                        if _gdata:
+                            self.gallery_view._start_preview_count(_gdata)
+            except Exception:
+                logger.exception(
+                    "closeEvent cancel: preview counter restart failed")
             event.ignore()
 
 
@@ -9607,9 +11508,11 @@ class MainWindow(QMainWindow):
 # ============================================================
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setStyle("Fusion")
+    # [PATCH-1.1-FIX11-NB100] Fusion only on Win/Linux
+    if platform.system() != "Darwin":
+        app.setStyle("Fusion")
     
-    # --- Фикс иконки для панели задач Windows ---
+    # --- Windows taskbar icon fix ---
     import ctypes
     try:
         myappid = 'TinoMakesDev.MemoryCalendar.1.0' 
@@ -9617,24 +11520,28 @@ if __name__ == "__main__":
     except Exception:
         pass
     
-    # --- Загрузка иконки ---
+    # --- Load icon ---
     from PySide6.QtGui import QIcon
-    if hasattr(sys, '_MEIPASS'):
-        # Если запущено как .exe
-        _icon_path = os.path.join(sys._MEIPASS, "iconDone.ico")
+    # [PATCH-1.1-FIX11] platform-aware icon selection
+    _sys = platform.system()
+    if _sys == "Darwin":
+        _icon_names = ("iconDone.icns", "iconDone.png", "iconDone.ico")
     else:
-        # Если запущено как .py скрипт
-        _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "iconDone.ico")
-        
-    if os.path.exists(_icon_path):
-        app.setWindowIcon(QIcon(_icon_path))
+        _icon_names = ("iconDone.ico", "iconDone.png")
+    _base = (sys._MEIPASS if hasattr(sys, '_MEIPASS')
+             else os.path.dirname(os.path.abspath(__file__)))
+    for _name in _icon_names:
+        _icon_path = os.path.join(_base, _name)
+        if os.path.exists(_icon_path):
+            app.setWindowIcon(QIcon(_icon_path))
+            break
     # -------------------------------------------
 
     # OS integration metadata
     app.setApplicationName("Memory Calendar")
     app.setApplicationDisplayName("Memory Calendar")
     app.setOrganizationName("MemoryCalendar")
-    app.setApplicationVersion("1.0")
+    app.setApplicationVersion("1.1")  # [PATCH-1.1-00]
     
     if platform.system() == "Darwin":
         tr._current["modifier_key"] = "Cmd"
@@ -9649,7 +11556,20 @@ if __name__ == "__main__":
     except Exception:
         font = QFont()
     app.setFont(font)
-    
+
+    # [PATCH-1.1-FIX15-B4] recalculate FONT_FAMILY now that a
+    # QApplication exists — on Linux QFontDatabase.systemFont()
+    # before QApplication may return "" (module-level call runs at
+    # import time). Recompute the module global so every later
+    # reference (QFont(FONT_FAMILY, …), apply_styles CSS) sees the
+    # real system font.
+    try:
+        _ff_new = _system_font_family()
+        if _ff_new:
+            FONT_FAMILY = _ff_new
+    except Exception:
+        pass
+
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
